@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Logs
+*.log
+sec_pipeline.log
+
+# Data files (large/sensitive)
+raw_sec_facts*.json
+formatted_sec_data.json
+merged_sec_data.json
+xbrl_instance_*.xml
+batch_processing_report.json
+
+# Google Cloud
+.env.yaml
+*.json
+!package.json
+!package-lock.json
+service-account-key.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+gcp_check_output.txt
+
+# PDF files (copyrighted content)
+*.pdf
+
+# Backup files
+*.bak
+*.backup

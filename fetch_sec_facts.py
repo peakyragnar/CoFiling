@@ -57,15 +57,16 @@ def analyze_filing_completeness(filing_index, captured_file):
     
     completeness = (captured_size / total_size * 100) if total_size > 0 else 0
     
-    print(f"\n📊 Completeness Analysis:")
-    print(f"   - Capturing: {captured_size:,} bytes ({completeness:.1f}%)")
-    print(f"   - Total filing: {total_size:,} bytes")
-    print(f"   - Missing: {total_size - captured_size:,} bytes ({100-completeness:.1f}%)")
+    print(f"\n📊 Primary Document Analysis:")
+    print(f"   - Primary HTML: {captured_size:,} bytes ({completeness:.1f}% of total filing)")
+    print(f"   - Total filing size: {total_size:,} bytes")
+    print(f"   - Additional documents: {total_size - captured_size:,} bytes")
     
     if xbrl_files:
-        print(f"\n⚠️  Missing {len(xbrl_files)} XBRL files (detailed financial data)")
+        print(f"\n📋 Additional files available:")
+        print(f"   - {len(xbrl_files)} XBRL files (we'll fetch instance directly)")
     if exhibits:
-        print(f"⚠️  Missing {len(exhibits)} exhibits (contracts, certifications)")
+        print(f"   - {len(exhibits)} exhibits (certifications, not needed for financial data)")
     
     return completeness
 
@@ -195,8 +196,7 @@ def fetch_full_filing(submissions_data, filing_type='10-Q', index=0):
                 # Analyze completeness
                 if filing_index:
                     completeness = analyze_filing_completeness(filing_index, filename)
-                    print(f"\n💡 For 100% capture, download:")
-                    print(f"   https://www.sec.gov/Archives/edgar/data/{submissions_data['cik']}/{accession_clean}/{accession}-xbrl.zip")
+                    print(f"\n✓ Will fetch XBRL instance directly for complete structured data")
                 
                 return {"report_date": report_date, "text": text, "accession": accession}
             else:
@@ -421,6 +421,7 @@ if submissions:
         # Fetch XBRL instance directly for complete segment data
         accession = full_filing.get('accession')
         report_date = full_filing.get('report_date')
+        xbrl_data = None  # Initialize for verification later
         if accession and report_date:
             instance_path = fetch_xbrl_instance_direct(submissions['cik'], accession, report_date)
             if instance_path:
@@ -484,6 +485,96 @@ def parse_pdf_earnings(pdf_path):
                                 segments[row[1]] = row[2] if len(row) > 2 else "N/A"
                     tables.append(df.to_dict())  # Save all tables
     return {"text": text, "tables": tables, "segments": segments}
+
+def run_final_verification(raw_data, formatted, merged_data, xbrl_data, pdf_data):
+    """
+    Comprehensive verification that all data was captured correctly
+    Returns True if all checks pass, False otherwise
+    """
+    all_passed = True
+    
+    # 1. SEC API Verification
+    print("\n1️⃣ SEC API Data:")
+    api_checks = {
+        "Company Facts fetched": len(raw_data.get('facts', {}).get('us-gaap', {})) > 500,
+        "Entity name captured": 'entityName' in raw_data,
+        "CIK matches expected": str(raw_data.get('cik')) == '1318605'  # Tesla (without leading zeros)
+    }
+    
+    for check, passed in api_checks.items():
+        status = "✅" if passed else "❌"
+        print(f"   {status} {check}")
+        if not passed:
+            all_passed = False
+    
+    # 2. XBRL Instance Verification  
+    print("\n2️⃣ XBRL Instance Data:")
+    xbrl_checks = {
+        "XBRL instance fetched": xbrl_data is not None,
+        "Segments found (>15)": len(formatted['structured']['segments']) > 15,
+        "Segment facts (>400)": sum(len(members) for dim in formatted['structured']['segments'].values() 
+                                    for members in dim.values()) > 400
+    }
+    
+    for check, passed in xbrl_checks.items():
+        status = "✅" if passed else "❌"
+        print(f"   {status} {check}")
+        if not passed:
+            all_passed = False
+    
+    # 3. Data Completeness
+    print("\n3️⃣ Data Completeness:")
+    completeness_checks = {
+        "Total facts > 500": len(formatted['structured']['facts']) > 500,
+        "Has revenue data": 'Revenues' in formatted['structured']['facts'] or 'RevenueFromContractWithCustomerExcludingAssessedTax' in formatted['structured']['facts'],
+        "Has automotive segment": any('Automotive' in member for member in formatted['structured']['segments'].get('ProductOrServiceAxis', {})),
+        "Has filing text": len(formatted['text'].get('full_filing', '')) > 100000
+    }
+    
+    for check, passed in completeness_checks.items():
+        status = "✅" if passed else "❌"
+        print(f"   {status} {check}")
+        if not passed:
+            all_passed = False
+    
+    # 4. PDF Processing
+    print("\n4️⃣ PDF Supplement:")
+    pdf_checks = {
+        "PDF parsed": pdf_data is not None,
+        "Tables extracted": len(pdf_data.get('tables', [])) > 0,
+        "Text extracted": len(pdf_data.get('text', '')) > 1000
+    }
+    
+    for check, passed in pdf_checks.items():
+        status = "✅" if passed else "❌"
+        print(f"   {status} {check}")
+        if not passed:
+            all_passed = False
+    
+    # 5. Cloud Upload
+    print("\n5️⃣ Cloud Storage:")
+    cloud_checks = {
+        "Merged JSON created": os.path.exists('merged_sec_data.json'),
+        "File size > 1MB": os.path.exists('merged_sec_data.json') and os.path.getsize('merged_sec_data.json') > 1000000
+    }
+    
+    for check, passed in cloud_checks.items():
+        status = "✅" if passed else "❌"
+        print(f"   {status} {check}")
+        if not passed:
+            all_passed = False
+    
+    # 6. Key Metrics Summary
+    print("\n📊 Key Metrics:")
+    print(f"   - Total concepts: {len(raw_data.get('facts', {}).get('us-gaap', {}))}")
+    print(f"   - Segment dimensions: {len(formatted['structured']['segments'])}")
+    segment_fact_count = sum(len(members) for dim in formatted['structured']['segments'].values() for members in dim.values())
+    print(f"   - Facts with segments: {segment_fact_count}")
+    print(f"   - Filing text size: {len(formatted['text'].get('full_filing', '')):,} chars")
+    if pdf_data:
+        print(f"   - PDF tables extracted: {len(pdf_data.get('tables', []))}")
+    
+    return all_passed
 
 # Run for manual PDF
 pdf_path = 'tsla_q1_2025_earnings.pdf'  # Your downloaded file
@@ -589,5 +680,25 @@ if os.path.exists(pdf_path):
     # Run after merging
     upload_to_gcs('merged_sec_data.json')
     insert_to_bigquery(merged_data)
+    
+    # Run final verification
+    print("\n" + "="*60)
+    print("🔍 FINAL VERIFICATION REPORT")
+    print("="*60)
+    
+    verification_passed = run_final_verification(
+        raw_data, 
+        formatted, 
+        merged_data,
+        xbrl_data if 'xbrl_data' in locals() else None,
+        pdf_data
+    )
+    
+    if verification_passed:
+        print("\n✅ ALL VERIFICATION CHECKS PASSED!")
+        print("   SEC filing data successfully captured and processed.")
+    else:
+        print("\n⚠️  SOME VERIFICATION CHECKS FAILED!")
+        print("   Review the output above for details.")
 else:
     print(f"PDF file {pdf_path} not found. Please download Tesla's Q1 2025 earnings PDF and save it as '{pdf_path}'")

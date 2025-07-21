@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        padding: 20px;
+      }
+      
+      .company-list {
+        margin: 20px 0;
+      }
+      
+      .company-item {
+        display: flex;
+        margin-bottom: 10px;
+        align-items: center;
+      }
+      
+      .company-item input {
+        margin-right: 10px;
+        padding: 5px;
+        width: 120px;
+      }
+      
+      .company-item button {
+        margin-left: 10px;
+        padding: 5px 10px;
+        background-color: #f44336;
+        color: white;
+        border: none;
+        border-radius: 3px;
+        cursor: pointer;
+      }
+      
+      .add-button {
+        padding: 8px 15px;
+        background-color: #4CAF50;
+        color: white;
+        border: none;
+        border-radius: 3px;
+        cursor: pointer;
+        margin-right: 10px;
+      }
+      
+      .save-button {
+        padding: 10px 20px;
+        background-color: #2196F3;
+        color: white;
+        border: none;
+        border-radius: 3px;
+        cursor: pointer;
+        font-size: 16px;
+      }
+      
+      button:hover {
+        opacity: 0.8;
+      }
+      
+      .header {
+        font-size: 18px;
+        font-weight: bold;
+        margin-bottom: 10px;
+      }
+      
+      .info {
+        color: #666;
+        font-size: 14px;
+        margin-bottom: 20px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="header">Configure Companies for Analysis</div>
+    <div class="info">Add CIK numbers and company names to track</div>
+    
+    <div id="companyList" class="company-list">
+      <!-- Companies will be added here -->
+    </div>
+    
+    <div>
+      <button class="add-button" onclick="addCompany()">Add Company</button>
+      <button class="save-button" onclick="saveConfiguration()">Save Configuration</button>
+    </div>
+    
+    <script>
+      // Load existing companies on startup
+      google.script.run.withSuccessHandler(loadCompanies).getConfiguredCompanies();
+      
+      function loadCompanies(companies) {
+        const container = document.getElementById('companyList');
+        container.innerHTML = '';
+        
+        // Add default companies if none exist
+        if (!companies || companies.length === 0) {
+          companies = [
+            {cik: '0001318605', name: 'Tesla'},
+            {cik: '0000320193', name: 'Apple'},
+            {cik: '0001652044', name: 'Alphabet'}
+          ];
+        }
+        
+        companies.forEach(company => {
+          addCompanyRow(company.cik, company.name);
+        });
+      }
+      
+      function addCompany() {
+        addCompanyRow('', '');
+      }
+      
+      function addCompanyRow(cik, name) {
+        const container = document.getElementById('companyList');
+        const div = document.createElement('div');
+        div.className = 'company-item';
+        
+        div.innerHTML = `
+          <input type="text" placeholder="CIK (10 digits)" value="${cik}" class="cik-input">
+          <input type="text" placeholder="Company Name" value="${name}" class="name-input">
+          <button onclick="removeCompany(this)">Remove</button>
+        `;
+        
+        container.appendChild(div);
+      }
+      
+      function removeCompany(button) {
+        button.parentElement.remove();
+      }
+      
+      function saveConfiguration() {
+        const companies = [];
+        const items = document.querySelectorAll('.company-item');
+        
+        items.forEach(item => {
+          const cik = item.querySelector('.cik-input').value.trim();
+          const name = item.querySelector('.name-input').value.trim();
+          
+          if (cik && name) {
+            // Pad CIK to 10 digits
+            const paddedCik = cik.padStart(10, '0');
+            companies.push({cik: paddedCik, name: name});
+          }
+        });
+        
+        if (companies.length === 0) {
+          alert('Please add at least one company');
+          return;
+        }
+        
+        // Save configuration
+        google.script.run
+          .withSuccessHandler(() => {
+            google.script.host.close();
+          })
+          .withFailureHandler((error) => {
+            alert('Error saving configuration: ' + error);
+          })
+          .saveCompanyConfig(companies);
+      }
+    </script>
+  </body>
+</html>
