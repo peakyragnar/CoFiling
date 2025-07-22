@@ -9,6 +9,14 @@ import PIL.Image
 import io
 import pypdf
 
+# Try to load .env file if it exists
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # dotenv not installed, will use system environment variables
+    pass
+
 logger = logging.getLogger(__name__)
 
 
@@ -36,13 +44,16 @@ class GeminiClient:
         
         logger.info("Gemini client initialized")
     
-    def extract_pdf_data(self, pdf_path: str, page_numbers: Optional[List[int]] = None) -> Dict[str, Any]:
+    def extract_pdf_data(self, pdf_path: str, page_numbers: Optional[List[int]] = None, 
+                        custom_prompt: Optional[str] = None, expected_structure: Optional[Dict] = None) -> Dict[str, Any]:
         """
         Extract structured data from PDF using Gemini's vision capabilities
         
         Args:
             pdf_path: Path to PDF file
             page_numbers: Specific pages to analyze (None = all pages)
+            custom_prompt: Optional custom prompt for extraction
+            expected_structure: Optional structure to guide extraction
             
         Returns:
             Extracted data including segments, metrics, and financial data
@@ -52,8 +63,12 @@ class GeminiClient:
         # Convert PDF pages to images
         pdf_images = self._pdf_to_images(pdf_path, page_numbers)
         
-        # Structured prompt for data extraction
-        extraction_prompt = """
+        # Use custom prompt if provided, otherwise use default
+        if custom_prompt:
+            extraction_prompt = custom_prompt
+        else:
+            # Default structured prompt for data extraction
+            extraction_prompt = """
         Analyze this earnings report page and extract ALL financial data, metrics, and segments.
         
         Focus on finding:
@@ -116,6 +131,10 @@ class GeminiClient:
         Extract actual numbers from charts, graphs, tables, and text. If a value is shown as a percentage, include the % symbol.
         """
         
+        # Add expected structure to prompt if provided
+        if expected_structure and not custom_prompt:
+            extraction_prompt += f"\n\nExpected data structure:\n{json.dumps(expected_structure, indent=2)}"
+        
         all_extracted_data = {
             "vehicle_metrics": {},
             "energy_metrics": {},
@@ -154,11 +173,15 @@ class GeminiClient:
     
     def _pdf_to_images(self, pdf_path: str, page_numbers: Optional[List[int]] = None) -> List[tuple]:
         """Convert PDF pages to PIL images for Gemini processing"""
+        from pdf2image import convert_from_path
+        
         images = []
         
-        with open(pdf_path, 'rb') as file:
-            pdf_reader = pypdf.PdfReader(file)
-            total_pages = len(pdf_reader.pages)
+        # Convert PDF to images
+        try:
+            # Convert all pages to images
+            pdf_images = convert_from_path(pdf_path, dpi=150)
+            total_pages = len(pdf_images)
             
             # Determine which pages to process
             if page_numbers:
@@ -169,17 +192,16 @@ class GeminiClient:
             
             logger.info(f"Processing {len(pages_to_process)} pages from PDF")
             
-            # Note: For production, we'd convert PDF pages to images
-            # For now, we'll use a placeholder approach
-            # In practice, you'd use pdf2image or similar library
-            
+            # Get the specific pages
             for page_num in pages_to_process:
-                # Placeholder: In production, convert PDF page to PIL Image
-                # image = convert_pdf_page_to_image(pdf_reader.pages[page_num-1])
-                # images.append((page_num, image))
+                # Page numbers are 1-based, but list is 0-based
+                image = pdf_images[page_num - 1]
+                images.append((page_num, image))
                 
-                # For now, we'll just track page numbers
-                images.append((page_num, None))
+        except Exception as e:
+            logger.error(f"Error converting PDF to images: {e}")
+            logger.info("Ensure poppler-utils is installed: brew install poppler (macOS) or apt-get install poppler-utils (Linux)")
+            raise
         
         return images
     

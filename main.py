@@ -10,12 +10,17 @@ import os
 import sys
 from pathlib import Path
 
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
+
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
 from ingestion.sec_fetcher import SECFetcher
 from extraction.xbrl_parser import XBRLParser
 from validation.sec_validator import SECValidator
+from validation.generic_pdf_validator import GenericPDFValidator
 
 # Configure logging
 logging.basicConfig(
@@ -88,15 +93,18 @@ def main():
         use_gemini = bool(os.environ.get('GOOGLE_API_KEY'))
         
         if use_gemini:
-            from ai.gemini_client import GeminiPDFParser
-            pdf_parser = GeminiPDFParser()
-            logger.info("Using Gemini-enhanced PDF parsing")
+            from extraction.generic_parser import GenericEarningsParser
+            from ai.gemini_client import GeminiClient
+            
+            gemini_client = GeminiClient()
+            pdf_parser = GenericEarningsParser(use_gemini=True)
+            logger.info("Using Gemini-enhanced generic PDF parsing")
+            pdf_data = pdf_parser.parse_earnings_pdf(args.pdf, gemini_client)
         else:
-            from extraction.earnings_parser import EarningsParser
-            pdf_parser = EarningsParser()
+            from extraction.generic_parser import GenericEarningsParser
+            pdf_parser = GenericEarningsParser(use_gemini=False)
             logger.info("Using traditional PDF parsing (set GOOGLE_API_KEY for enhanced parsing)")
-        
-        pdf_data = pdf_parser.parse_earnings_pdf(args.pdf)
+            pdf_data = pdf_parser.parse_earnings_pdf(args.pdf)
         
         # Save PDF data
         pdf_file = output_dir / f'earnings_data_{args.cik}.json'
@@ -104,9 +112,17 @@ def main():
             json.dump(pdf_data, f, indent=2)
         logger.info(f"PDF data saved to {pdf_file}")
         
+        # Validate PDF extraction
+        pdf_validator = GenericPDFValidator()
+        pdf_validation = pdf_validator.validate_extraction(pdf_data)
+        
+        # Save PDF validation report
+        pdf_validation_file = output_dir / f'pdf_validation_report_{args.cik}.json'
+        with open(pdf_validation_file, 'w') as f:
+            json.dump(pdf_validation, f, indent=2)
+        
         # Show PDF extraction summary
-        if 'extraction_summary' in pdf_data:
-            print_pdf_summary(pdf_data)
+        print_pdf_summary(pdf_data, pdf_validation)
     
     return 0 if validation_results['is_complete'] else 1
 
@@ -177,36 +193,106 @@ def print_extraction_summary(formatted_data, validation_results):
     print("="*60 + "\n")
 
 
-def print_pdf_summary(pdf_data: dict):
-    """Print summary of PDF extraction results"""
+def print_pdf_summary(pdf_data: dict, validation_results: dict):
+    """Print summary of PDF extraction and validation results"""
     print("\n" + "="*60)
     print("PDF EXTRACTION SUMMARY")
     print("="*60)
     
-    summary = pdf_data.get('extraction_summary', {})
+    # Extract summary info
+    summary = validation_results.get('summary', {})
+    print(f"\nCompany: {summary.get('company', 'Unknown')}")
+    print(f"Period: {summary.get('period', 'Unknown')}")
+    print(f"Business Model: {summary.get('business_model', 'Unknown')}")
+    print(f"Extraction Method: {summary.get('extraction_method', 'Unknown')}")
+    print(f"Data Points Extracted: {summary.get('data_points_extracted', 0)}")
     
-    # Show what was found
-    print("\nData Extracted:")
-    print(f"  ✓ Vehicle metrics" if summary.get('vehicle_metrics_found') else "  ✗ Vehicle metrics")
-    print(f"  ✓ Energy metrics" if summary.get('energy_metrics_found') else "  ✗ Energy metrics")
-    print(f"  ✓ Financial segments" if summary.get('financial_segments_found') else "  ✗ Financial segments")
-    print(f"  ✓ Margins" if summary.get('margins_found') else "  ✗ Margins")
+    # Structure validation
+    structure_check = validation_results.get('detailed_checks', {}).get('structure', {})
+    if structure_check:
+        print("\nData Structure:")
+        print(f"  - Hierarchical Data: {'✓' if structure_check.get('has_hierarchical_data') else '✗'}")
+        print(f"  - Flat Metrics: {'✓' if structure_check.get('has_flat_metrics') else '✗'}")
+        print(f"  - Time Series: {'✓' if structure_check.get('has_time_series') else '✗'}")
+        if structure_check.get('hierarchical_categories'):
+            print(f"  - Categories: {', '.join(structure_check['hierarchical_categories'])}")
     
-    if summary.get('gemini_enhanced'):
-        print(f"\n  🤖 Gemini Vision processed {summary.get('gemini_pages_processed', 0)} pages")
+    # Completeness check
+    completeness_check = validation_results.get('detailed_checks', {}).get('completeness', {})
+    if completeness_check.get('expected_vs_extracted'):
+        exp_vs_ext = completeness_check['expected_vs_extracted']
+        print(f"\nExtraction Completeness:")
+        print(f"  - Expected Data Points: {exp_vs_ext.get('expected', 0)}")
+        print(f"  - Extracted Data Points: {exp_vs_ext.get('extracted', 0)}")
+        print(f"  - Extraction Rate: {completeness_check.get('extraction_rate', 0):.1%}")
     
-    # Show key metrics
-    if pdf_data.get('vehicle_metrics', {}).get('deliveries'):
-        print("\nVehicle Deliveries Found:")
-        for model, data in pdf_data['vehicle_metrics']['deliveries'].items():
-            if isinstance(data, dict):
-                print(f"  - {model}: {data.get('value', 'N/A'):,}")
+    # Hierarchy validation
+    hierarchy_check = validation_results.get('detailed_checks', {}).get('hierarchies', {})
+    if hierarchy_check.get('_summary'):
+        h_summary = hierarchy_check['_summary']
+        print(f"\nHierarchical Data Validation:")
+        print(f"  - Total Hierarchies: {h_summary.get('total_hierarchies', 0)}")
+        print(f"  - Valid Hierarchies: {h_summary.get('valid_hierarchies', 0)}")
+        if hierarchy_check.get('validation_errors'):
+            print(f"  - Errors: {', '.join(hierarchy_check['validation_errors'][:2])}")
     
-    if pdf_data.get('energy_metrics', {}).get('storage_deployed_gwh'):
-        value = pdf_data['energy_metrics']['storage_deployed_gwh']
-        if isinstance(value, dict):
-            print(f"\nEnergy Storage: {value.get('value', 'N/A')} GWh")
+    # Display some actual extracted data
+    print("\nSample Extracted Data:")
     
+    # Get the actual data from the generic structure
+    if isinstance(pdf_data, dict) and 'data' in pdf_data:
+        actual_data = pdf_data['data']
+    else:
+        actual_data = pdf_data
+    
+    # Show hierarchical data samples
+    if 'hierarchical_data' in actual_data:
+        for category, cat_data in actual_data['hierarchical_data'].items():
+            if isinstance(cat_data, dict):
+                print(f"\n  {category.title()}:")
+                sample_count = 0
+                for key, value in cat_data.items():
+                    if sample_count >= 3:  # Show only 3 samples per category
+                        break
+                    if isinstance(value, dict) and 'value' in value:
+                        print(f"    - {key}: {value['value']} {value.get('unit', '')}")
+                        sample_count += 1
+    
+    # Show flat metrics samples
+    if 'flat_metrics' in actual_data and actual_data['flat_metrics']:
+        print("\n  Operational Metrics:")
+        sample_count = 0
+        for metric_name, metric_data in actual_data['flat_metrics'].items():
+            if sample_count >= 3:
+                break
+            if isinstance(metric_data, dict) and metric_data.get('value') is not None:
+                value = metric_data['value']
+                unit = metric_data.get('unit', '')
+                print(f"    - {metric_name}: {value:,.0f if isinstance(value, (int, float)) else value} {unit}")
+                sample_count += 1
+    
+    # Data quality summary
+    quality = validation_results.get('data_quality', {})
+    if quality:
+        print(f"\nData Quality:")
+        print(f"  - Numeric Data Valid: {'✓' if quality.get('numeric_data_valid') else '✗'}")
+        print(f"  - Units Consistent: {'✓' if quality.get('units_consistent') else '✗'}")
+        if quality.get('average_confidence'):
+            print(f"  - Average Confidence: {quality['average_confidence']:.2f}")
+        if quality.get('issues'):
+            print(f"  - Issues Found: {len(quality['issues'])}")
+    
+    # Completeness score
+    print(f"\nOverall Completeness: {validation_results.get('completeness_score', 0):.1%}")
+    
+    # Recommendations
+    if validation_results.get('recommendations'):
+        print(f"\nRecommendations:")
+        for i, rec in enumerate(validation_results['recommendations'][:3]):
+            print(f"  {i+1}. {rec}")
+    
+    # Overall status
+    print(f"\nStatus: {'✓ EXTRACTION COMPLETE' if validation_results.get('is_complete') else '✗ EXTRACTION INCOMPLETE'}")
     print("="*60 + "\n")
 
 

@@ -27,6 +27,12 @@ batch_processing_report.json
 !package-lock.json
 service-account-key.json
 
+# API Keys and Environment Variables
+.env
+*.env
+.env.*
+!.env.example
+
 # IDE
 .idea/
 .vscode/
