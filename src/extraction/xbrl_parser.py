@@ -2,20 +2,28 @@
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Any, Optional
 import json
+from datetime import datetime
 
 class XBRLParser:
     """Parser for XBRL data from SEC filings"""
     
-    def parse_company_facts(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+    def parse_company_facts(self, raw_data: Dict[str, Any], 
+                            years_back: int = 5) -> Dict[str, Any]:
         """
         Parse company facts JSON data from SEC API
         
         Args:
             raw_data: Raw JSON data from SEC Company Facts API
+            years_back: Number of full years to include (default: 5)
             
         Returns:
             Structured dictionary with facts and segments
         """
+        # Calculate the cutoff year
+        current_year = datetime.now().year
+        cutoff_year = current_year - years_back
+        
+        print(f"Filtering for periods: {cutoff_year}-{current_year} (last {years_back} full years + current year)")
         facts = raw_data.get('facts', {}).get('us-gaap', {})
         
         formatted = {
@@ -44,33 +52,42 @@ class XBRLParser:
                              v.get('instant') or v.get('start'))
                     value = v.get('val')
                     
+                    # Filter by period
                     if period and value is not None:
-                        fact_list.append({
-                            "period": period,
-                            "value": value,
-                            "unit": unit
-                        })
-                        fact_count += 1
-                    
-                    # Handle segments (dimensions)
-                    if 'segment' in v:
-                        segment_count += 1
-                        for seg in v['segment']:
-                            axis = seg.get('dimension', '')
-                            member = seg.get('value', '')
-                            
-                            if axis not in formatted["structured"]["segments"]:
-                                formatted["structured"]["segments"][axis] = {}
-                            
-                            if member not in formatted["structured"]["segments"][axis]:
-                                formatted["structured"]["segments"][axis][member] = []
-                            
-                            formatted["structured"]["segments"][axis][member].append({
-                                "concept": concept,
+                        # Extract year from period
+                        period_year = self._extract_year_from_period(period)
+                        
+                        # Only include if within our date range
+                        if period_year and period_year >= cutoff_year:
+                            fact_list.append({
                                 "period": period,
                                 "value": value,
                                 "unit": unit
                             })
+                            fact_count += 1
+                    
+                    # Handle segments (dimensions) - also filter by period
+                    if 'segment' in v and period:
+                        period_year = self._extract_year_from_period(period)
+                        
+                        if period_year and period_year >= cutoff_year:
+                            segment_count += 1
+                            for seg in v['segment']:
+                                axis = seg.get('dimension', '')
+                                member = seg.get('value', '')
+                                
+                                if axis not in formatted["structured"]["segments"]:
+                                    formatted["structured"]["segments"][axis] = {}
+                                
+                                if member not in formatted["structured"]["segments"][axis]:
+                                    formatted["structured"]["segments"][axis][member] = []
+                                
+                                formatted["structured"]["segments"][axis][member].append({
+                                    "concept": concept,
+                                    "period": period,
+                                    "value": value,
+                                    "unit": unit
+                                })
                 
                 if fact_list:
                     formatted["structured"]["facts"][concept] = fact_list
@@ -170,3 +187,40 @@ class XBRLParser:
                             'value': value
                         })
         return segments
+    
+    def _extract_year_from_period(self, period: Any) -> Optional[int]:
+        """Extract year from various period formats"""
+        if not period:
+            return None
+            
+        period_str = str(period)
+        
+        # Handle different period formats
+        try:
+            # Format: YYYY (fiscal year)
+            if len(period_str) == 4 and period_str.isdigit():
+                return int(period_str)
+            
+            # Format: YYYY-MM-DD (dates)
+            if '-' in period_str:
+                year_part = period_str.split('-')[0]
+                if len(year_part) == 4 and year_part.isdigit():
+                    return int(year_part)
+            
+            # Format: YYYYMMDD
+            if len(period_str) == 8 and period_str.isdigit():
+                return int(period_str[:4])
+            
+            # Format: CY2024Q1 or FY2024
+            if 'Y' in period_str.upper():
+                # Extract year after Y
+                parts = period_str.upper().split('Y')
+                if len(parts) > 1:
+                    year_str = parts[1][:4]
+                    if year_str.isdigit():
+                        return int(year_str)
+                        
+        except (ValueError, IndexError):
+            pass
+            
+        return None

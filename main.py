@@ -30,6 +30,7 @@ def main():
     parser.add_argument('--cik', required=True, help='Company CIK (e.g., 1318605 for Tesla)')
     parser.add_argument('--pdf', help='Path to earnings PDF (optional for now)')
     parser.add_argument('--output-dir', default='output', help='Output directory for results')
+    parser.add_argument('--years', type=int, default=5, help='Number of full years to include (default: 5)')
     
     args = parser.parse_args()
     
@@ -55,9 +56,9 @@ def main():
     logger.info(f"Raw data saved to {raw_file}")
     
     # Step 2: Parse and structure the data
-    logger.info("Parsing XBRL data...")
+    logger.info(f"Parsing XBRL data (last {args.years} full years + current year)...")
     parser = XBRLParser()
-    formatted_data = parser.parse_company_facts(raw_data)
+    formatted_data = parser.parse_company_facts(raw_data, years_back=args.years)
     
     # Save formatted data
     formatted_file = output_dir / f'formatted_sec_data_{args.cik}.json'
@@ -103,6 +104,14 @@ def print_extraction_summary(formatted_data, validation_results):
     print(f"  - Segment dimensions: {summary.get('segment_dimensions', 0)}")
     print(f"  - Segment facts: {summary.get('segment_facts', 0):,}")
     print(f"  - Unique periods: {summary.get('unique_periods', 0)}")
+    
+    # Period coverage
+    period_coverage = summary.get('period_coverage', {})
+    if period_coverage:
+        print(f"\nPeriod Coverage:")
+        print(f"  - Year range: {period_coverage.get('year_range', 'N/A')}")
+        print(f"  - Total years: {period_coverage.get('total_years', 0)}")
+        print(f"  - Quarterly periods: {period_coverage.get('quarters_count', 0)}")
     
     # Validation checks
     print(f"\nValidation Results:")

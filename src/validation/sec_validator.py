@@ -85,7 +85,8 @@ class SECValidator:
             'total_facts': sum(len(entries) for entries in formatted_facts.values()),
             'segment_dimensions': len(segments),
             'segment_facts': segment_fact_count,
-            'unique_periods': self._count_unique_periods(formatted_facts)
+            'unique_periods': self._count_unique_periods(formatted_facts),
+            'period_coverage': self._get_period_coverage(formatted_facts)
         }
     
     def _run_detailed_checks(self, raw_data: Dict[str, Any], 
@@ -248,3 +249,33 @@ class SECValidator:
                 if 'value' not in fact or fact['value'] is None:
                     return False
         return True
+    
+    def _get_period_coverage(self, formatted_facts: Dict[str, List[Dict]]) -> Dict[str, Any]:
+        """Get period coverage information"""
+        years = set()
+        quarters = set()
+        
+        for fact_list in formatted_facts.values():
+            for fact in fact_list:
+                period = fact.get('period')
+                if period:
+                    period_str = str(period)
+                    # Extract year
+                    if '-' in period_str:
+                        year = period_str.split('-')[0]
+                        if len(year) == 4 and year.isdigit():
+                            years.add(int(year))
+                            # Check if it's a quarterly period
+                            if len(period_str) >= 10:  # YYYY-MM-DD format
+                                quarters.add(period_str[:7])  # YYYY-MM
+                    elif len(period_str) == 4 and period_str.isdigit():
+                        years.add(int(period_str))
+        
+        sorted_years = sorted(years)
+        
+        return {
+            'years': sorted_years,
+            'year_range': f"{sorted_years[0]}-{sorted_years[-1]}" if sorted_years else "N/A",
+            'total_years': len(years),
+            'quarters_count': len(quarters)
+        }
