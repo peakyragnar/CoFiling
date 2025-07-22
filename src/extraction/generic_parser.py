@@ -116,12 +116,25 @@ class GenericEarningsParser:
                 prompt = self._generate_generic_prompt(data_type, schema)
             
             # Extract using Gemini with custom prompt
-            gemini_response = gemini_client.extract_pdf_data(
-                pdf_path,
-                page_numbers=pages,
-                custom_prompt=prompt,
-                expected_structure=self._get_expected_structure(data_type, schema)
-            )
+            # Use parallel extraction for better performance
+            if hasattr(gemini_client, 'extract_pdf_data_parallel'):
+                # Convert pages list to priorities
+                page_priorities = {page: 1.0 if i < 5 else 0.8 for i, page in enumerate(pages)}
+                
+                gemini_response = gemini_client.extract_pdf_data_parallel(
+                    pdf_path,
+                    page_priorities=page_priorities,
+                    custom_prompt=prompt,
+                    expected_structure=self._get_expected_structure(data_type, schema)
+                )
+            else:
+                # Fallback to sequential extraction
+                gemini_response = gemini_client.extract_pdf_data(
+                    pdf_path,
+                    page_numbers=pages,
+                    custom_prompt=prompt,
+                    expected_structure=self._get_expected_structure(data_type, schema)
+                )
             
             # Merge Gemini results into extracted data
             self._merge_gemini_results(extracted_data, gemini_response, data_type)

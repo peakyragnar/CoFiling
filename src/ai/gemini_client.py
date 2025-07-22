@@ -8,6 +8,7 @@ from pathlib import Path
 import PIL.Image
 import io
 import pypdf
+from .parallel_extractor import ParallelPDFExtractor
 
 # Try to load .env file if it exists
 try:
@@ -43,6 +44,38 @@ class GeminiClient:
         self.pro_model = genai.GenerativeModel('gemini-2.0-flash-exp')
         
         logger.info("Gemini client initialized")
+        
+        # Initialize parallel extractor with fewer workers to avoid rate limits
+        self.parallel_extractor = ParallelPDFExtractor(self, max_workers=2)
+    
+    def extract_pdf_data_parallel(self, pdf_path: str, page_priorities: Optional[Dict[int, float]] = None,
+                                 custom_prompt: Optional[str] = None, expected_structure: Optional[Dict] = None) -> Dict[str, Any]:
+        """
+        Extract data from PDF using parallel processing for better performance
+        
+        Args:
+            pdf_path: Path to PDF file
+            page_priorities: Optional dict mapping page numbers to priority scores
+            custom_prompt: Optional custom extraction prompt
+            expected_structure: Optional expected data structure
+            
+        Returns:
+            Extracted data with parallel processing metadata
+        """
+        logger.info(f"Starting parallel extraction for: {pdf_path}")
+        
+        # Use parallel extractor
+        result = self.parallel_extractor.extract_parallel(
+            pdf_path, 
+            page_priorities=page_priorities,
+            custom_prompt=custom_prompt,
+            expected_structure=expected_structure
+        )
+        
+        # Post-process the results
+        self._post_process_extraction(result)
+        
+        return result
     
     def extract_pdf_data(self, pdf_path: str, page_numbers: Optional[List[int]] = None, 
                         custom_prompt: Optional[str] = None, expected_structure: Optional[Dict] = None) -> Dict[str, Any]:

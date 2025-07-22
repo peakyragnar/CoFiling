@@ -3,6 +3,7 @@ import xml.etree.ElementTree as ET
 from typing import Dict, List, Any, Optional
 import json
 from datetime import datetime
+from .segment_discovery import SegmentDiscovery
 
 class XBRLParser:
     """Parser for XBRL data from SEC filings"""
@@ -94,6 +95,30 @@ class XBRLParser:
         
         print(f"✓ Parsed {fact_count} facts across {len(facts)} concepts")
         print(f"✓ Found {segment_count} segment entries across {len(formatted['structured']['segments'])} dimensions")
+        
+        # Use segment discovery to find additional segment data
+        segment_discovery = SegmentDiscovery()
+        company_name = raw_data.get('entityName', '').lower()
+        
+        # Clean company name for matching
+        if 'tesla' in company_name:
+            company_name = 'tesla'
+        
+        discovered_segments = segment_discovery.discover_segments(raw_data, company_name)
+        
+        # Add discovered segments to output
+        formatted['structured']['discovered_segments'] = discovered_segments
+        
+        # Merge implicit segments into main segments structure
+        if discovered_segments['implicit_segments']:
+            for segment_type, concepts in discovered_segments['implicit_segments'].items():
+                if concepts:  # Only add if there are concepts
+                    formatted['structured']['segments'][f'{segment_type}_segments'] = concepts
+        
+        # Update segment count
+        total_segment_concepts = discovered_segments['segment_summary'].get('total_segment_concepts', 0)
+        if total_segment_concepts > 0:
+            print(f"✓ Discovered {total_segment_concepts} additional segment concepts")
         
         return formatted
     
