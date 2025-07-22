@@ -1,0 +1,35 @@
+Financial Metric,Value,Unit,Period
+Revenues,111.9M,USD,2011
+CostOfRevenue,102.4M,USD,2011
+GrossProfit,9.5M,USD,2011
+OperatingIncomeLoss,-51897000,USD,2011
+NetIncomeLoss,-55740000,USD,2011
+Assets,386.1M,USD,2011
+Liabilities,179.0M,USD,2011
+StockholdersEquity,-199714000,USD,2011
+CashAndCashEquivalentsAtCarryingValue,9.3M,USD,2011
+EarningsPerShareBasic,-0.86,USD/shares,2013
+
+Segment Analysis,,,
+Dimension,Members Count,,
+PropertyPlantAndEquipmentByTypeAxis,9,,
+ProductOrServiceAxis,10,,
+StatementEquityComponentsAxis,6,,
+CumulativeEffectPeriodOfAdoptionAxis,1,,
+BalanceSheetLocationAxis,4,,
+AntidilutiveSecuritiesExcludedFromComputationOfEarningsPerShareByAntidilutiveSecuritiesAxis,1,,
+AccountsNotesLoansAndFinancingReceivableByReceivableTypeAxis,1,,
+RestatementAxis,2,,
+FinancialInstrumentAxis,7,,
+FairValueByFairValueHierarchyLevelAxis,3,,
+CryptoAssetAxis,1,,
+IncomeStatementLocationAxis,3,,
+DebtInstrumentAxis,6,,
+LongtermDebtTypeAxis,2,,
+RangeAxis,2,,
+CreditFacilityAxis,1,,
+AwardTypeAxis,1,,
+LitigationCaseAxis,1,,
+ConsolidatedEntitiesAxis,1,,
+StatementBusinessSegmentsAxis,2,,
+StatementGeographicalAxis,4,,
