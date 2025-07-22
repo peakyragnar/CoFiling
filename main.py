@@ -6,6 +6,7 @@ Usage: python main.py --cik 1318605 --pdf tsla_q1_2025_earnings.pdf
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -78,8 +79,34 @@ def main():
     # Print summary
     print_extraction_summary(formatted_data, validation_results)
     
+    # Step 4: Process PDF if provided
+    pdf_data = None
     if args.pdf:
-        logger.info(f"PDF processing not yet implemented: {args.pdf}")
+        logger.info(f"Processing earnings PDF: {args.pdf}")
+        
+        # Check if Gemini is available
+        use_gemini = bool(os.environ.get('GOOGLE_API_KEY'))
+        
+        if use_gemini:
+            from ai.gemini_client import GeminiPDFParser
+            pdf_parser = GeminiPDFParser()
+            logger.info("Using Gemini-enhanced PDF parsing")
+        else:
+            from extraction.earnings_parser import EarningsParser
+            pdf_parser = EarningsParser()
+            logger.info("Using traditional PDF parsing (set GOOGLE_API_KEY for enhanced parsing)")
+        
+        pdf_data = pdf_parser.parse_earnings_pdf(args.pdf)
+        
+        # Save PDF data
+        pdf_file = output_dir / f'earnings_data_{args.cik}.json'
+        with open(pdf_file, 'w') as f:
+            json.dump(pdf_data, f, indent=2)
+        logger.info(f"PDF data saved to {pdf_file}")
+        
+        # Show PDF extraction summary
+        if 'extraction_summary' in pdf_data:
+            print_pdf_summary(pdf_data)
     
     return 0 if validation_results['is_complete'] else 1
 
@@ -147,6 +174,39 @@ def print_extraction_summary(formatted_data, validation_results):
     
     # Overall status
     print(f"\nOverall Status: {'✓ COMPLETE' if validation_results.get('is_complete') else '✗ INCOMPLETE'}")
+    print("="*60 + "\n")
+
+
+def print_pdf_summary(pdf_data: dict):
+    """Print summary of PDF extraction results"""
+    print("\n" + "="*60)
+    print("PDF EXTRACTION SUMMARY")
+    print("="*60)
+    
+    summary = pdf_data.get('extraction_summary', {})
+    
+    # Show what was found
+    print("\nData Extracted:")
+    print(f"  ✓ Vehicle metrics" if summary.get('vehicle_metrics_found') else "  ✗ Vehicle metrics")
+    print(f"  ✓ Energy metrics" if summary.get('energy_metrics_found') else "  ✗ Energy metrics")
+    print(f"  ✓ Financial segments" if summary.get('financial_segments_found') else "  ✗ Financial segments")
+    print(f"  ✓ Margins" if summary.get('margins_found') else "  ✗ Margins")
+    
+    if summary.get('gemini_enhanced'):
+        print(f"\n  🤖 Gemini Vision processed {summary.get('gemini_pages_processed', 0)} pages")
+    
+    # Show key metrics
+    if pdf_data.get('vehicle_metrics', {}).get('deliveries'):
+        print("\nVehicle Deliveries Found:")
+        for model, data in pdf_data['vehicle_metrics']['deliveries'].items():
+            if isinstance(data, dict):
+                print(f"  - {model}: {data.get('value', 'N/A'):,}")
+    
+    if pdf_data.get('energy_metrics', {}).get('storage_deployed_gwh'):
+        value = pdf_data['energy_metrics']['storage_deployed_gwh']
+        if isinstance(value, dict):
+            print(f"\nEnergy Storage: {value.get('value', 'N/A')} GWh")
+    
     print("="*60 + "\n")
 
 

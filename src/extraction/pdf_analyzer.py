@@ -6,7 +6,9 @@ This will help us build a better parser
 
 import pdfplumber
 import json
+import sys
 from typing import List, Dict, Any
+from pathlib import Path
 
 def analyze_pdf_structure(pdf_path: str) -> Dict[str, Any]:
     """
@@ -118,9 +120,13 @@ def identify_target_tables(analysis: Dict[str, Any]) -> Dict[str, List[Dict]]:
     return targets
 
 def main():
-    pdf_path = "tsla_q1_2025_earnings.pdf"
+    if len(sys.argv) < 2:
+        print("Usage: python pdf_analyzer.py <pdf_path>")
+        sys.exit(1)
     
-    print("🔍 Analyzing Tesla Q1 2025 Earnings PDF...")
+    pdf_path = sys.argv[1]
+    
+    print(f"🔍 Analyzing PDF: {Path(pdf_path).name}")
     print("=" * 60)
     
     # Analyze PDF structure
@@ -171,6 +177,11 @@ def main():
     print("\n4. Geographic Breakdown:")
     print("   - US revenue")
     print("   - China revenue")
+    print("   - Other regions revenue")
+
+
+if __name__ == "__main__":
+    main()
     print("   - Other markets revenue")
     print("\n5. Margins:")
     print("   - Automotive gross margin")
