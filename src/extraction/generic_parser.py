@@ -322,6 +322,9 @@ class GenericEarningsParser:
         if not text:
             return None
         
+        # Convert to string if not already
+        text = str(text)
+        
         # Remove common symbols and spaces
         cleaned = text.replace('$', '').replace(',', '').replace(' ', '')
         
@@ -329,9 +332,29 @@ class GenericEarningsParser:
         if '(' in cleaned and ')' in cleaned:
             cleaned = '-' + cleaned.replace('(', '').replace(')', '')
         
+        # Extract multiplier
+        multiplier = 1.0
+        if cleaned.upper().endswith('M') or cleaned.upper().endswith('MN'):
+            multiplier = 1.0  # Already in millions
+            cleaned = re.sub(r'[Mm][Nn]?$', '', cleaned)
+        elif cleaned.upper().endswith('B') or cleaned.upper().endswith('BN'):
+            multiplier = 1000.0  # Convert billions to millions
+            cleaned = re.sub(r'[Bb][Nn]?$', '', cleaned)
+        elif cleaned.upper().endswith('K'):
+            multiplier = 0.001  # Convert thousands to millions
+            cleaned = re.sub(r'[Kk]$', '', cleaned)
+        
         try:
-            return float(cleaned)
+            base_value = float(cleaned)
+            return base_value * multiplier
         except ValueError:
+            # Try extracting just numbers
+            match = re.search(r'-?\d+\.?\d*', cleaned)
+            if match:
+                try:
+                    return float(match.group()) * multiplier
+                except ValueError:
+                    pass
             return None
     
     def _infer_metric_name(self, context: str) -> Optional[str]:
@@ -406,7 +429,10 @@ class GenericEarningsParser:
         # Also handle any raw extractions
         if "raw_extractions" in gemini_response:
             for extraction in gemini_response["raw_extractions"]:
-                # Extract all values from raw extractions
+                # Process structured extraction data
+                self._process_structured_extraction(extracted_data, extraction)
+                
+                # Also extract all values from raw extractions as fallback
                 values_found = self._extract_all_values(extraction)
                 for value_info in values_found:
                     self._place_value_in_schema(extracted_data, value_info, data_type)
@@ -548,12 +574,16 @@ class GenericEarningsParser:
         value = value_info.get('value')
         path = value_info.get('path', '')
         
-        if value is None or value == '':
+        # More robust empty value check
+        if value is None or (isinstance(value, str) and not value.strip()):
             return
         
         # Skip metadata fields
-        if key in ['page_number', 'period', 'confidence', 'context', 'unit', 'currency']:
+        if key in ['page_number', 'period', 'confidence', 'context', 'unit', 'currency', 'type', 'path']:
             return
+        
+        # Log successful value extraction for debugging
+        logger.debug(f"Placing value: key={key}, value={value}, type={value_type}, path={path}")
         
         # Determine where to place the value based on its type and context
         if value_type == 'revenue':
@@ -570,22 +600,33 @@ class GenericEarningsParser:
                 
                 # Ensure we're creating proper value structure
                 segment_key = key.title() if key.islower() else key
-                extracted_data['hierarchical_data']['financial']['segments'][segment_key] = {
-                    'value': float(value) if isinstance(value, (int, float)) else self._parse_number(str(value)),
-                    'currency': 'USD',
-                    'unit': 'millions',
-                    'source_page': value_info.get('page')
-                }
+                # Clean segment key
+                segment_key = segment_key.replace('Revenue', '').replace('_', ' ').strip()
+                if not segment_key:
+                    segment_key = key
+                    
+                parsed_value = self._parse_number(str(value)) if not isinstance(value, (int, float)) else float(value)
+                if parsed_value is not None:
+                    extracted_data['hierarchical_data']['financial']['segments'][segment_key] = {
+                        'value': parsed_value,
+                        'currency': 'USD',
+                        'unit': 'millions',
+                        'source_page': value_info.get('page')
+                    }
+                    logger.info(f"Added segment {segment_key}: ${parsed_value}M")
             elif 'total' in key_lower:
                 # Total revenue
                 if 'revenue' not in extracted_data['hierarchical_data']['financial']:
                     extracted_data['hierarchical_data']['financial']['revenue'] = {}
-                extracted_data['hierarchical_data']['financial']['revenue']['total'] = {
-                    'value': float(value) if isinstance(value, (int, float)) else self._parse_number(str(value)),
-                    'currency': 'USD',
-                    'unit': 'millions',
-                    'source_page': value_info.get('page')
-                }
+                parsed_value = self._parse_number(str(value)) if not isinstance(value, (int, float)) else float(value)
+                if parsed_value is not None:
+                    extracted_data['hierarchical_data']['financial']['revenue']['total'] = {
+                        'value': parsed_value,
+                        'currency': 'USD',
+                        'unit': 'millions',
+                        'source_page': value_info.get('page')
+                    }
+                    logger.info(f"Added total revenue: ${parsed_value}M")
         
         elif value_type == 'margin':
             if 'hierarchical_data' not in extracted_data:
@@ -596,11 +637,23 @@ class GenericEarningsParser:
                 extracted_data['hierarchical_data']['financial']['margins'] = {}
             
             # Clean margin value
-            margin_value = value
-            if isinstance(value, str) and '%' in value:
-                margin_value = float(value.replace('%', ''))
+            margin_value = None
+            if isinstance(value, str):
+                # Remove % and parse
+                cleaned = value.replace('%', '').strip()
+                try:
+                    margin_value = float(cleaned)
+                except ValueError:
+                    # Try parsing with _parse_number
+                    parsed = self._parse_number(cleaned)
+                    if parsed is not None:
+                        margin_value = parsed
             elif isinstance(value, (int, float)):
                 margin_value = float(value)
+            
+            if margin_value is None:
+                logger.warning(f"Failed to parse margin value: {value}")
+                return
             
             # Map to proper margin name
             key_lower = key.lower()
@@ -620,11 +673,14 @@ class GenericEarningsParser:
                 extracted_data['flat_metrics'] = {}
             
             metric_name = self._normalize_metric_name(key)
-            extracted_data['flat_metrics'][metric_name] = {
-                'value': self._parse_number(str(value)),
-                'unit': self._infer_unit(str(value)),
-                'source_page': value_info.get('page')
-            }
+            parsed_value = self._parse_number(str(value))
+            if parsed_value is not None:
+                extracted_data['flat_metrics'][metric_name] = {
+                    'value': parsed_value,
+                    'unit': self._infer_unit(str(value)),
+                    'source_page': value_info.get('page')
+                }
+                logger.info(f"Added operational metric {metric_name}: {parsed_value}")
         
         else:
             # Default: add to flat metrics
@@ -647,26 +703,42 @@ class GenericEarningsParser:
     
     def _place_value_in_schema(self, extracted_data: Dict, value_info: Dict, data_type: str):
         """Place a found value in the appropriate schema location"""
-        # This is a fallback for values not handled by the default merger
-        # You can extend this based on patterns you discover
+        # Use the same logic as _place_generic_value but with path-based type inference
+        if 'type' not in value_info:
+            value_info['type'] = self._infer_value_type(value_info.get('path', ''), value_info.get('value'))
+        
+        self._place_generic_value(extracted_data, value_info, data_type)
     
     def _generate_generic_prompt(self, data_type: str, schema: Dict) -> str:
         """Generate a generic extraction prompt"""
         return f"""
-        Extract {data_type} data from this document.
+        Extract {data_type} data from this earnings report page.
         
-        Look for:
-        1. All numerical values with their units
-        2. The context that explains what each number represents
-        3. Any hierarchical relationships (totals and breakdowns)
-        4. Time periods associated with the data
+        Focus on finding:
+        1. Revenue figures (total, automotive, energy, services, etc.)
+        2. Margin percentages (gross margin, operating margin, etc.)
+        3. Operational metrics (deliveries, production, units, etc.)
+        4. Financial metrics (income, costs, profits, etc.)
         
-        Return structured data with:
-        - value: the numerical value
-        - unit: the unit of measurement
-        - context: what this number represents
-        - period: time period if mentioned
-        - confidence: your confidence in the extraction (0-1)
+        IMPORTANT: Return data as a JSON object with this structure:
+        {{
+            "revenue": {{
+                "total": "19335M",
+                "automotive": "13967M",
+                "energy": "2730M",
+                "services": "2638M"
+            }},
+            "margins": {{
+                "gross_margin": "16.3%",
+                "operating_margin": "2.1%"
+            }},
+            "operational": {{
+                "vehicle_deliveries": "423074",
+                "production": "412376"
+            }}
+        }}
+        
+        Extract exact values as shown in the document. Include currency symbols and units (M for millions, B for billions, % for percentages).
         """
     
     def _get_expected_structure(self, data_type: str, schema: Dict) -> Dict:
@@ -765,6 +837,101 @@ class GenericEarningsParser:
             "message": "All segments have values",
             "rule": rule["rule"]
         }
+    
+    def _process_structured_extraction(self, extracted_data: Dict, extraction: Dict):
+        """Process structured extraction data from Gemini"""
+        # Handle revenue data
+        if "revenue" in extraction:
+            revenue_data = extraction["revenue"]
+            if "hierarchical_data" not in extracted_data:
+                extracted_data["hierarchical_data"] = {}
+            if "financial" not in extracted_data["hierarchical_data"]:
+                extracted_data["hierarchical_data"]["financial"] = {}
+            
+            # Total revenue
+            if "total" in revenue_data:
+                if "revenue" not in extracted_data["hierarchical_data"]["financial"]:
+                    extracted_data["hierarchical_data"]["financial"]["revenue"] = {}
+                
+                parsed_total = self._parse_number(str(revenue_data["total"]))
+                if parsed_total is not None:
+                    extracted_data["hierarchical_data"]["financial"]["revenue"]["total"] = {
+                        "value": parsed_total,
+                        "currency": "USD",
+                        "unit": "millions"
+                    }
+                    logger.info(f"Extracted total revenue: ${parsed_total}M")
+            
+            # Segment revenues
+            if "segments" in revenue_data:
+                if "segments" not in extracted_data["hierarchical_data"]["financial"]:
+                    extracted_data["hierarchical_data"]["financial"]["segments"] = {}
+                
+                for segment, value in revenue_data["segments"].items():
+                    parsed_value = self._parse_number(str(value))
+                    if parsed_value is not None:
+                        segment_name = segment.replace('_', ' ').title()
+                        extracted_data["hierarchical_data"]["financial"]["segments"][segment_name] = {
+                            "value": parsed_value,
+                            "currency": "USD",
+                            "unit": "millions"
+                        }
+                        logger.info(f"Extracted {segment_name} revenue: ${parsed_value}M")
+        
+        # Handle margins
+        if "margins" in extraction:
+            if "hierarchical_data" not in extracted_data:
+                extracted_data["hierarchical_data"] = {}
+            if "financial" not in extracted_data["hierarchical_data"]:
+                extracted_data["hierarchical_data"]["financial"] = {}
+            if "margins" not in extracted_data["hierarchical_data"]["financial"]:
+                extracted_data["hierarchical_data"]["financial"]["margins"] = {}
+            
+            for margin_type, value in extraction["margins"].items():
+                if value and isinstance(value, (str, int, float)):
+                    # Parse percentage
+                    if isinstance(value, str):
+                        margin_value = float(value.replace('%', '').strip())
+                    else:
+                        margin_value = float(value)
+                    
+                    extracted_data["hierarchical_data"]["financial"]["margins"][margin_type] = margin_value
+                    logger.info(f"Extracted {margin_type} margin: {margin_value}%")
+        
+        # Handle operational metrics
+        if "operational_metrics" in extraction or "operational" in extraction:
+            ops_data = extraction.get("operational_metrics") or extraction.get("operational", {})
+            if "flat_metrics" not in extracted_data:
+                extracted_data["flat_metrics"] = {}
+            
+            for metric, value in ops_data.items():
+                if value:
+                    parsed_value = self._parse_number(str(value))
+                    if parsed_value is not None:
+                        extracted_data["flat_metrics"][metric] = {
+                            "value": parsed_value,
+                            "unit": "units"
+                        }
+                        logger.info(f"Extracted {metric}: {parsed_value}")
+        
+        # Handle geographic revenue
+        if "geographic_revenue" in extraction:
+            if "hierarchical_data" not in extracted_data:
+                extracted_data["hierarchical_data"] = {}
+            if "geographic" not in extracted_data["hierarchical_data"]:
+                extracted_data["hierarchical_data"]["geographic"] = {"regions": {}}
+            
+            for region, value in extraction["geographic_revenue"].items():
+                if value:
+                    parsed_value = self._parse_number(str(value))
+                    if parsed_value is not None:
+                        region_name = region.replace('_', ' ').title()
+                        extracted_data["hierarchical_data"]["geographic"]["regions"][region_name] = {
+                            "value": parsed_value,
+                            "currency": "USD",
+                            "unit": "millions"
+                        }
+                        logger.info(f"Extracted {region_name} revenue: ${parsed_value}M")
     
     def _calculate_completeness(self, extracted_data: Dict, schema: Dict) -> float:
         """Calculate how complete the extraction is"""

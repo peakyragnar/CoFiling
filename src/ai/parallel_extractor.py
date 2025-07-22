@@ -19,13 +19,15 @@ class ParallelPDFExtractor:
     Includes caching, progress tracking, and intelligent page selection
     """
     
-    def __init__(self, gemini_client, max_workers: int = 3, cache_dir: str = "output/cache"):
+    def __init__(self, gemini_client, max_workers: int = 1, cache_dir: str = "output/cache"):
         self.gemini_client = gemini_client
-        self.max_workers = max_workers  # Reduced to avoid rate limits
+        self.max_workers = max_workers  # Set to 1 to avoid rate limits
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.request_times = []  # Track request times for rate limiting
-        self.requests_per_minute = 10  # Gemini rate limit
+        self.requests_per_minute = 8  # Conservative limit below Gemini's 10/min
+        self.retry_count = 3  # Number of retries for failed requests
+        self.base_delay = 2.0  # Base delay between requests in seconds
         
     def extract_parallel(self, pdf_path: str, page_priorities: Dict[int, float] = None,
                         custom_prompt: str = None, expected_structure: Dict = None) -> Dict[str, Any]:
@@ -134,11 +136,13 @@ class ParallelPDFExtractor:
             if page_priorities and page_num in page_priorities:
                 priority = page_priorities[page_num]
             else:
-                # Higher priority for early pages (financial summary usually in first 10 pages)
-                if page_num <= 5:
+                # Higher priority for pages with financial data (usually pages 3-6)
+                if page_num in [4, 5]:  # Key financial summary pages
                     priority = 1.0
+                elif page_num in [3, 6, 7]:
+                    priority = 0.9
                 elif page_num <= 10:
-                    priority = 0.8
+                    priority = 0.7
                 elif page_num <= 20:
                     priority = 0.5
                 else:
@@ -154,72 +158,152 @@ class ParallelPDFExtractor:
     
     def _process_single_page(self, page_num: int, image: Any, 
                            custom_prompt: str = None, expected_structure: Dict = None) -> Dict:
-        """Process a single page and return extracted data"""
-        try:
-            logger.debug(f"Processing page {page_num}")
-            
-            # Simple rate limiting
-            self._apply_rate_limit()
-            
-            # Use the gemini client's vision model directly
-            prompt = custom_prompt or self._get_default_prompt()
-            
-            response = self.gemini_client.vision_model.generate_content([prompt, image])
-            
-            # Parse response
-            extracted = self._parse_json_response(response.text)
-            
-            if extracted:
-                extracted['page_number'] = page_num
-                return {
-                    "page": page_num,
-                    "extracted_data": extracted,
-                    "success": True
-                }
-            else:
-                return {
-                    "page": page_num,
-                    "extracted_data": {},
-                    "success": False,
-                    "error": "Failed to parse response"
-                }
+        """Process a single page with retry logic"""
+        for retry in range(self.retry_count + 1):
+            try:
+                logger.debug(f"Processing page {page_num} (attempt {retry + 1}/{self.retry_count + 1})")
                 
-        except Exception as e:
-            logger.error(f"Error in page {page_num}: {e}")
-            return {
-                "page": page_num,
-                "extracted_data": {},
-                "success": False,
-                "error": str(e)
-            }
+                # Apply rate limiting with exponential backoff
+                self._apply_rate_limit(retry_count=retry)
+                
+                # Use the gemini client's vision model directly
+                prompt = custom_prompt or self._get_default_prompt()
+                
+                # Add page context to prompt
+                contextualized_prompt = f"{prompt}\n\nYou are looking at page {page_num} of an earnings report."
+                
+                response = self.gemini_client.vision_model.generate_content([contextualized_prompt, image])
+                
+                # Parse response
+                extracted = self._parse_json_response(response.text)
+                
+                if extracted:
+                    extracted['page_number'] = page_num
+                    logger.info(f"Successfully extracted data from page {page_num}")
+                    return {
+                        "page": page_num,
+                        "extracted_data": extracted,
+                        "success": True
+                    }
+                else:
+                    raise ValueError("Failed to parse JSON response")
+                    
+            except Exception as e:
+                error_msg = str(e)
+                
+                # Check if it's a rate limit error
+                if "429" in error_msg or "quota" in error_msg.lower() or "resource_exhausted" in error_msg.lower():
+                    logger.warning(f"Rate limit hit on page {page_num}, retry {retry + 1}/{self.retry_count + 1}")
+                    if retry < self.retry_count:
+                        # Extra wait for rate limit errors
+                        time.sleep(5)
+                        continue
+                
+                # Log error and potentially retry
+                if retry < self.retry_count:
+                    logger.warning(f"Error on page {page_num} (retry {retry + 1}): {error_msg}")
+                    continue
+                else:
+                    logger.error(f"Failed to process page {page_num} after {self.retry_count + 1} attempts: {error_msg}")
+                    return {
+                        "page": page_num,
+                        "extracted_data": {},
+                        "success": False,
+                        "error": error_msg
+                    }
     
     def _get_default_prompt(self) -> str:
         """Get default extraction prompt"""
         return """
-        Extract all financial data, metrics, and segments from this earnings report page.
+        Extract ALL financial and operational data from this earnings report page.
         
-        Focus on:
-        1. Revenue data (total and by segment)
-        2. Financial metrics (margins, profits, costs)
-        3. Operational metrics (units, volumes, etc.)
-        4. Time series data (quarters, YoY comparisons)
+        Return a JSON object with this exact structure (fill in values you find):
+        {
+            "revenue": {
+                "total": "value with unit (e.g., 19335M)",
+                "automotive": "value with unit",
+                "energy": "value with unit",
+                "services": "value with unit",
+                "other_segments": {"segment_name": "value"}
+            },
+            "margins": {
+                "gross_margin": "percentage (e.g., 16.3%)",
+                "operating_margin": "percentage",
+                "net_margin": "percentage"
+            },
+            "income": {
+                "gross_profit": "value with unit",
+                "operating_income": "value with unit",
+                "net_income": "value with unit"
+            },
+            "operational": {
+                "deliveries": "number",
+                "production": "number",
+                "capacity": "number",
+                "other_metrics": {"metric_name": "value"}
+            },
+            "costs": {
+                "cost_of_revenue": "value with unit",
+                "operating_expenses": "value with unit",
+                "r_and_d": "value with unit"
+            },
+            "period": "Q1 2025 or similar",
+            "comparisons": {
+                "yoy_revenue_growth": "percentage",
+                "qoq_revenue_growth": "percentage"
+            }
+        }
         
-        Return as JSON with the actual values, units, and context.
+        IMPORTANT:
+        1. Include the exact values as shown (e.g., "$19,335M" or "19335M")
+        2. Keep percentages with % symbol (e.g., "16.3%")
+        3. For missing values, omit the key rather than using null
+        4. Extract ALL numbers you see with their context
         """
     
     def _parse_json_response(self, response_text: str) -> Optional[Dict]:
         """Extract JSON from response text"""
         try:
-            # Find JSON in response
-            json_start = response_text.find('{')
-            json_end = response_text.rfind('}') + 1
+            # Log response for debugging
+            logger.debug(f"Response text length: {len(response_text)}")
+            
+            # Remove markdown code block markers if present
+            cleaned_text = response_text.strip()
+            if cleaned_text.startswith('```json'):
+                cleaned_text = cleaned_text[7:]  # Remove ```json
+            if cleaned_text.startswith('```'):
+                cleaned_text = cleaned_text[3:]  # Remove ```
+            if cleaned_text.endswith('```'):
+                cleaned_text = cleaned_text[:-3]  # Remove trailing ```
+            
+            cleaned_text = cleaned_text.strip()
+            
+            # Try to parse the cleaned text first
+            try:
+                parsed = json.loads(cleaned_text)
+                logger.debug(f"Successfully parsed JSON with {len(parsed)} keys")
+                return parsed
+            except json.JSONDecodeError:
+                pass
+            
+            # Find JSON in response as fallback
+            json_start = cleaned_text.find('{')
+            json_end = cleaned_text.rfind('}') + 1
             
             if json_start >= 0 and json_end > json_start:
-                json_str = response_text[json_start:json_end]
-                return json.loads(json_str)
+                json_str = cleaned_text[json_start:json_end]
+                parsed = json.loads(json_str)
+                logger.debug(f"Successfully parsed JSON with {len(parsed)} keys")
+                return parsed
+            else:
+                logger.warning(f"No JSON structure found. Response preview: {response_text[:100]}...")
+                return None
                 
-        except json.JSONDecodeError:
-            logger.error("Failed to parse JSON from response")
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error at position {e.pos}: {e.msg}")
+            logger.debug(f"Failed to parse: {cleaned_text[:200]}...")
+        except Exception as e:
+            logger.error(f"Unexpected error parsing response: {type(e).__name__}: {e}")
             
         return None
     
@@ -294,12 +378,18 @@ class ParallelPDFExtractor:
         except Exception as e:
             logger.warning(f"Failed to cache result: {e}")
     
-    def _apply_rate_limit(self):
-        """Apply rate limiting to avoid API quota errors"""
+    def _apply_rate_limit(self, retry_count: int = 0):
+        """Apply rate limiting with exponential backoff"""
         import threading
         
         with threading.Lock():
             current_time = time.time()
+            
+            # Apply exponential backoff for retries
+            if retry_count > 0:
+                backoff_time = self.base_delay * (2 ** (retry_count - 1))
+                logger.info(f"Retry {retry_count}: Applying exponential backoff of {backoff_time:.1f}s")
+                time.sleep(backoff_time)
             
             # Remove old request times (older than 60 seconds)
             self.request_times = [t for t in self.request_times if current_time - t < 60]
@@ -307,11 +397,14 @@ class ParallelPDFExtractor:
             # If we've made too many requests, wait
             if len(self.request_times) >= self.requests_per_minute:
                 oldest_request = min(self.request_times)
-                wait_time = 60 - (current_time - oldest_request) + 1
+                wait_time = 60 - (current_time - oldest_request) + 2  # Extra 2s buffer
                 
                 if wait_time > 0:
                     logger.info(f"Rate limit reached, waiting {wait_time:.1f} seconds...")
                     time.sleep(wait_time)
+            else:
+                # Apply base delay between requests
+                time.sleep(self.base_delay)
                     
             # Record this request
             self.request_times.append(time.time())

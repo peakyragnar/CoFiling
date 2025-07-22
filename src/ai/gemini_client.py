@@ -45,8 +45,8 @@ class GeminiClient:
         
         logger.info("Gemini client initialized")
         
-        # Initialize parallel extractor with fewer workers to avoid rate limits
-        self.parallel_extractor = ParallelPDFExtractor(self, max_workers=2)
+        # Initialize parallel extractor with single worker to avoid rate limits
+        self.parallel_extractor = ParallelPDFExtractor(self, max_workers=1)
     
     def extract_pdf_data_parallel(self, pdf_path: str, page_priorities: Optional[Dict[int, float]] = None,
                                  custom_prompt: Optional[str] = None, expected_structure: Optional[Dict] = None) -> Dict[str, Any]:
@@ -102,22 +102,46 @@ class GeminiClient:
         else:
             # Generic structured prompt for data extraction
             extraction_prompt = """
-        Analyze this earnings report page and extract ALL financial data, metrics, and segments.
+        Analyze this earnings report page and extract ALL financial data.
         
-        Extract any data you find including but not limited to:
-        1. Revenue data (total, by segment, by geography)
-        2. Operational metrics (units, volumes, customers, etc.)
-        3. Financial metrics (margins, profits, costs)
-        4. Time series data (quarterly/yearly comparisons)
-        5. Any other key metrics shown in charts, tables, or text
+        Return a properly structured JSON object following this template:
+        {
+            "revenue": {
+                "total": "19335M",
+                "segments": {
+                    "automotive": "13967M",
+                    "energy": "2730M",
+                    "services": "2638M"
+                }
+            },
+            "margins": {
+                "gross": "16.3%",
+                "operating": "2.1%",
+                "net": "2.1%"
+            },
+            "income": {
+                "gross_profit": "3153M",
+                "operating_income": "399M",
+                "net_income": "409M"
+            },
+            "operational_metrics": {
+                "vehicle_deliveries": "423074",
+                "vehicle_production": "412376",
+                "energy_storage_deployed": "9.4GWh"
+            },
+            "geographic_revenue": {
+                "united_states": "value",
+                "china": "value",
+                "other": "value"
+            }
+        }
         
-        Return the data as a JSON object. Include:
-        - The actual values found
-        - Units (millions, billions, %, etc.)
-        - The context/label for each value
-        - Period information if available
-        
-        Focus on extracting concrete numbers and their contexts.
+        CRITICAL INSTRUCTIONS:
+        1. Extract EXACT values as shown (e.g., "$19,335M" becomes "19335M")
+        2. Keep percentages with % (e.g., "16.3%")
+        3. Include units in the value (M for millions, B for billions)
+        4. For missing data, omit the key entirely
+        5. Use lowercase with underscores for all keys
         """
         
         # Add expected structure to prompt if provided
@@ -194,19 +218,40 @@ class GeminiClient:
     def _parse_json_response(self, response_text: str) -> Optional[Dict]:
         """Extract JSON from Gemini response"""
         try:
+            # Log response info
+            logger.debug(f"Parsing response of length: {len(response_text)}")
+            
+            # Try direct JSON parse first
+            try:
+                return json.loads(response_text)
+            except json.JSONDecodeError:
+                pass
+            
             # Try to find JSON in the response
             json_start = response_text.find('{')
             json_end = response_text.rfind('}') + 1
             
             if json_start >= 0 and json_end > json_start:
                 json_str = response_text[json_start:json_end]
-                return json.loads(json_str)
+                parsed = json.loads(json_str)
+                
+                # Log successful extraction
+                if parsed:
+                    keys_found = list(parsed.keys())
+                    logger.info(f"Extracted JSON with keys: {keys_found[:5]}...")
+                
+                return parsed
             else:
-                logger.warning("No JSON found in response")
+                logger.warning("No JSON structure found in response")
+                logger.debug(f"Response preview: {response_text[:200]}...")
                 return None
                 
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON: {e}")
+            logger.error(f"JSON decode error at position {e.pos}: {e.msg}")
+            logger.debug(f"Failed JSON: {response_text[max(0, e.pos-50):e.pos+50]}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error parsing JSON: {type(e).__name__}: {e}")
             return None
     
     def _extract_generic_values(self, target: Dict, source: Dict, page_num: int):
@@ -256,7 +301,9 @@ class GeminiClient:
         data['extraction_summary'] = {
             'pages_processed': len(data.get('raw_extractions', [])),
             'total_values_extracted': len(data.get('extracted_values', [])),
-            'value_types': {}
+            'value_types': {},
+            'extraction_errors': len(data.get('extraction_metadata', {}).get('errors', [])),
+            'cache_hits': data.get('extraction_metadata', {}).get('cache_hits', 0)
         }
         
         # Count values by type
@@ -265,7 +312,16 @@ class GeminiClient:
             data['extraction_summary']['value_types'][value_type] = \
                 data['extraction_summary']['value_types'].get(value_type, 0) + 1
         
-        logger.info(f"Extracted {data['extraction_summary']['total_values_extracted']} values")
+        # Log summary
+        logger.info(f"Extraction complete: {data['extraction_summary']['pages_processed']} pages, "
+                   f"{data['extraction_summary']['total_values_extracted']} values extracted")
+        
+        if data['extraction_summary']['extraction_errors'] > 0:
+            logger.warning(f"Encountered {data['extraction_summary']['extraction_errors']} errors during extraction")
+        
+        # Log value type breakdown
+        if data['extraction_summary']['value_types']:
+            logger.info(f"Value types: {data['extraction_summary']['value_types']}")
     
     def generate_financial_model(self, sec_data: Dict, earnings_data: Dict) -> Dict[str, Any]:
         """
