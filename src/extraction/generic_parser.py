@@ -115,11 +115,12 @@ class GenericEarningsParser:
                 # Generate generic prompt
                 prompt = self._generate_generic_prompt(data_type, schema)
             
-            # Extract using Gemini
-            # For now, use the standard extraction until we implement custom prompt support
+            # Extract using Gemini with custom prompt
             gemini_response = gemini_client.extract_pdf_data(
                 pdf_path,
-                page_numbers=pages
+                page_numbers=pages,
+                custom_prompt=prompt,
+                expected_structure=self._get_expected_structure(data_type, schema)
             )
             
             # Merge Gemini results into extracted data
@@ -383,25 +384,258 @@ class GenericEarningsParser:
     def _merge_gemini_results(self, extracted_data: Dict, gemini_response: Dict,
                              data_type: str):
         """Merge Gemini extraction results into main data structure"""
-        if data_type == "financial":
-            if "financial_segments" in gemini_response:
-                if "hierarchical_data" not in extracted_data:
-                    extracted_data["hierarchical_data"] = {}
-                if "financial" not in extracted_data["hierarchical_data"]:
-                    extracted_data["hierarchical_data"]["financial"] = {}
-                
-                extracted_data["hierarchical_data"]["financial"]["segments"] = gemini_response["financial_segments"]
+        # Handle the new generic response format
+        if "extracted_values" in gemini_response:
+            # New generic format
+            for value_info in gemini_response["extracted_values"]:
+                self._place_generic_value(extracted_data, value_info, data_type)
         
-        elif data_type == "operational_metrics":
-            if "vehicle_metrics" in gemini_response:  # Example
-                if "flat_metrics" not in extracted_data:
-                    extracted_data["flat_metrics"] = {}
+        # Also handle any raw extractions
+        if "raw_extractions" in gemini_response:
+            for extraction in gemini_response["raw_extractions"]:
+                # Extract all values from raw extractions
+                values_found = self._extract_all_values(extraction)
+                for value_info in values_found:
+                    self._place_value_in_schema(extracted_data, value_info, data_type)
+        
+        # Try legacy format as fallback
+        if not gemini_response.get("extracted_values") and not gemini_response.get("raw_extractions"):
+            # First, try to merge any direct matches from the default Gemini structure
+            self._merge_default_gemini_structure(extracted_data, gemini_response)
+            
+            # Then, recursively find and merge all values from Gemini response
+            values_found = self._extract_all_values(gemini_response)
+            
+            # Map found values to the appropriate schema locations
+            for value_info in values_found:
+                self._place_value_in_schema(extracted_data, value_info, data_type)
+    
+    def _merge_default_gemini_structure(self, extracted_data: Dict, gemini_response: Dict):
+        """Merge values from Gemini's default response structure"""
+        # Handle financial segments
+        if "financial_segments" in gemini_response and gemini_response["financial_segments"]:
+            if "hierarchical_data" not in extracted_data:
+                extracted_data["hierarchical_data"] = {}
+            if "financial" not in extracted_data["hierarchical_data"]:
+                extracted_data["hierarchical_data"]["financial"] = {}
+            
+            # Merge into the segments location
+            if "segments" not in extracted_data["hierarchical_data"]["financial"]:
+                extracted_data["hierarchical_data"]["financial"]["segments"] = {}
+            
+            extracted_data["hierarchical_data"]["financial"]["segments"].update(
+                gemini_response["financial_segments"]
+            )
+            
+            # Also update revenue total if available
+            if "total_revenue" in gemini_response["financial_segments"]:
+                total_rev = gemini_response["financial_segments"]["total_revenue"]
+                if "revenue" in extracted_data["hierarchical_data"]["financial"]:
+                    if isinstance(extracted_data["hierarchical_data"]["financial"]["revenue"], dict):
+                        if "total" in extracted_data["hierarchical_data"]["financial"]["revenue"]:
+                            extracted_data["hierarchical_data"]["financial"]["revenue"]["total"]["value"] = total_rev
+                            extracted_data["hierarchical_data"]["financial"]["revenue"]["total"]["currency"] = "USD"
+                            extracted_data["hierarchical_data"]["financial"]["revenue"]["total"]["unit"] = "millions"
+        
+        # Handle margins
+        if "margins" in gemini_response and gemini_response["margins"]:
+            if "hierarchical_data" in extracted_data and "financial" in extracted_data["hierarchical_data"]:
+                if "margins" not in extracted_data["hierarchical_data"]["financial"]:
+                    extracted_data["hierarchical_data"]["financial"]["margins"] = {}
                 
-                # Flatten operational metrics
-                for metric_type, metrics in gemini_response.get("vehicle_metrics", {}).items():
-                    for key, value in metrics.items():
-                        metric_name = f"{metric_type}_{key}".lower()
-                        extracted_data["flat_metrics"][metric_name] = value
+                for margin_type, value in gemini_response["margins"].items():
+                    # Clean up the value (remove % if it's a string)
+                    if isinstance(value, str) and value.endswith('%'):
+                        value = float(value.rstrip('%'))
+                    
+                    # Map to our structure
+                    if "gross" in margin_type.lower():
+                        extracted_data["hierarchical_data"]["financial"]["margins"]["gross"] = value
+                    elif "operating" in margin_type.lower():
+                        extracted_data["hierarchical_data"]["financial"]["margins"]["operating"] = value
+                    elif "net" in margin_type.lower():
+                        extracted_data["hierarchical_data"]["financial"]["margins"]["net"] = value
+        
+        # Handle vehicle/operational metrics
+        if "vehicle_metrics" in gemini_response:
+            self._merge_operational_metrics(extracted_data, gemini_response["vehicle_metrics"], "vehicle")
+        
+        # Handle energy metrics
+        if "energy_metrics" in gemini_response:
+            self._merge_operational_metrics(extracted_data, gemini_response["energy_metrics"], "energy")
+    
+    def _merge_operational_metrics(self, extracted_data: Dict, metrics: Dict, metric_type: str):
+        """Merge operational metrics into the appropriate structure"""
+        if not metrics:
+            return
+        
+        # Ensure flat_metrics exists
+        if "flat_metrics" not in extracted_data:
+            extracted_data["flat_metrics"] = {}
+        
+        # Process each metric
+        for category, category_data in metrics.items():
+            if isinstance(category_data, dict):
+                for metric_name, metric_value in category_data.items():
+                    # Create a descriptive key
+                    full_metric_name = f"{metric_type}_{category}_{metric_name}".lower()
+                    
+                    # Extract value and metadata
+                    if isinstance(metric_value, dict):
+                        extracted_data["flat_metrics"][full_metric_name] = metric_value
+                    else:
+                        extracted_data["flat_metrics"][full_metric_name] = {
+                            "value": metric_value,
+                            "unit": "units" if metric_type == "vehicle" else metric_type
+                        }
+    
+    def _extract_all_values(self, obj: Any, path: str = "") -> List[Dict[str, Any]]:
+        """Recursively extract all non-null values from a nested structure"""
+        values = []
+        
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                new_path = f"{path}.{key}" if path else key
+                if value is not None and not isinstance(value, (dict, list)):
+                    # Found a value
+                    values.append({
+                        "path": new_path,
+                        "key": key,
+                        "value": value,
+                        "context": self._get_context_from_path(new_path)
+                    })
+                else:
+                    # Recurse deeper
+                    values.extend(self._extract_all_values(value, new_path))
+        elif isinstance(obj, list):
+            for i, item in enumerate(obj):
+                values.extend(self._extract_all_values(item, f"{path}[{i}]"))
+        
+        return values
+    
+    def _get_context_from_path(self, path: str) -> str:
+        """Determine the context/type of a value from its path"""
+        path_lower = path.lower()
+        
+        if any(term in path_lower for term in ['revenue', 'sales']):
+            return "revenue"
+        elif any(term in path_lower for term in ['margin', 'gross', 'operating']):
+            return "margin"
+        elif any(term in path_lower for term in ['vehicle', 'delivery', 'production']):
+            return "operational"
+        elif any(term in path_lower for term in ['income', 'profit', 'earnings']):
+            return "income"
+        else:
+            return "other"
+    
+    def _place_generic_value(self, extracted_data: Dict, value_info: Dict, data_type: str):
+        """Place a generic extracted value in the appropriate schema location"""
+        value_type = value_info.get('type', 'other')
+        key = value_info.get('key', '')
+        value = value_info.get('value')
+        path = value_info.get('path', '')
+        
+        if value is None or value == '':
+            return
+        
+        # Skip metadata fields
+        if key in ['page_number', 'period', 'confidence', 'context', 'unit', 'currency']:
+            return
+        
+        # Determine where to place the value based on its type and context
+        if value_type == 'revenue':
+            if 'hierarchical_data' not in extracted_data:
+                extracted_data['hierarchical_data'] = {}
+            if 'financial' not in extracted_data['hierarchical_data']:
+                extracted_data['hierarchical_data']['financial'] = {}
+            
+            # Check if it's a segment revenue
+            key_lower = key.lower()
+            if any(seg in key_lower for seg in ['automotive', 'energy', 'services']):
+                if 'segments' not in extracted_data['hierarchical_data']['financial']:
+                    extracted_data['hierarchical_data']['financial']['segments'] = {}
+                
+                # Ensure we're creating proper value structure
+                segment_key = key.title() if key.islower() else key
+                extracted_data['hierarchical_data']['financial']['segments'][segment_key] = {
+                    'value': float(value) if isinstance(value, (int, float)) else self._parse_number(str(value)),
+                    'currency': 'USD',
+                    'unit': 'millions',
+                    'source_page': value_info.get('page')
+                }
+            elif 'total' in key_lower:
+                # Total revenue
+                if 'revenue' not in extracted_data['hierarchical_data']['financial']:
+                    extracted_data['hierarchical_data']['financial']['revenue'] = {}
+                extracted_data['hierarchical_data']['financial']['revenue']['total'] = {
+                    'value': float(value) if isinstance(value, (int, float)) else self._parse_number(str(value)),
+                    'currency': 'USD',
+                    'unit': 'millions',
+                    'source_page': value_info.get('page')
+                }
+        
+        elif value_type == 'margin':
+            if 'hierarchical_data' not in extracted_data:
+                extracted_data['hierarchical_data'] = {}
+            if 'financial' not in extracted_data['hierarchical_data']:
+                extracted_data['hierarchical_data']['financial'] = {}
+            if 'margins' not in extracted_data['hierarchical_data']['financial']:
+                extracted_data['hierarchical_data']['financial']['margins'] = {}
+            
+            # Clean margin value
+            margin_value = value
+            if isinstance(value, str) and '%' in value:
+                margin_value = float(value.replace('%', ''))
+            elif isinstance(value, (int, float)):
+                margin_value = float(value)
+            
+            # Map to proper margin name
+            key_lower = key.lower()
+            if 'gross' in key_lower:
+                margin_key = 'gross'
+            elif 'operating' in key_lower:
+                margin_key = 'operating'
+            elif 'net' in key_lower:
+                margin_key = 'net'
+            else:
+                margin_key = key.replace('_margin', '').replace('margin', '').strip()
+            
+            extracted_data['hierarchical_data']['financial']['margins'][margin_key] = margin_value
+        
+        elif value_type == 'operational':
+            if 'flat_metrics' not in extracted_data:
+                extracted_data['flat_metrics'] = {}
+            
+            metric_name = self._normalize_metric_name(key)
+            extracted_data['flat_metrics'][metric_name] = {
+                'value': self._parse_number(str(value)),
+                'unit': self._infer_unit(str(value)),
+                'source_page': value_info.get('page')
+            }
+        
+        else:
+            # Default: add to flat metrics
+            if 'flat_metrics' not in extracted_data:
+                extracted_data['flat_metrics'] = {}
+            
+            metric_name = self._normalize_metric_name(key)
+            extracted_data['flat_metrics'][metric_name] = {
+                'value': value,
+                'source_page': value_info.get('page')
+            }
+    
+    def _normalize_metric_name(self, name: str) -> str:
+        """Normalize metric names for consistency"""
+        # Convert to lowercase and replace spaces with underscores
+        normalized = name.lower().strip()
+        normalized = re.sub(r'\s+', '_', normalized)
+        normalized = re.sub(r'[^\w_]', '', normalized)
+        return normalized
+    
+    def _place_value_in_schema(self, extracted_data: Dict, value_info: Dict, data_type: str):
+        """Place a found value in the appropriate schema location"""
+        # This is a fallback for values not handled by the default merger
+        # You can extend this based on patterns you discover
     
     def _generate_generic_prompt(self, data_type: str, schema: Dict) -> str:
         """Generate a generic extraction prompt"""

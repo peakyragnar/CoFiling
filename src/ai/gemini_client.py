@@ -63,85 +63,38 @@ class GeminiClient:
         # Convert PDF pages to images
         pdf_images = self._pdf_to_images(pdf_path, page_numbers)
         
-        # Use custom prompt if provided, otherwise use default
+        # Use custom prompt if provided, otherwise use generic prompt
         if custom_prompt:
             extraction_prompt = custom_prompt
         else:
-            # Default structured prompt for data extraction
+            # Generic structured prompt for data extraction
             extraction_prompt = """
         Analyze this earnings report page and extract ALL financial data, metrics, and segments.
         
-        Focus on finding:
-        1. Vehicle Production and Deliveries:
-           - Model 3/Y numbers
-           - Model S/X numbers
-           - Total production
-           - Total deliveries
-           - By quarter if available
-        
-        2. Energy Metrics:
-           - Energy storage deployed (in GWh)
-           - Solar deployed (in MW)
-           - Megapack, Powerwall numbers
-        
-        3. Financial Segments:
-           - Automotive revenue
-           - Energy generation and storage revenue
-           - Services and other revenue
-           - Revenue by geography (US, China, Europe, Other)
-        
-        4. Margins:
-           - Total gross margin %
-           - Automotive gross margin %
-           - Operating margin %
-        
+        Extract any data you find including but not limited to:
+        1. Revenue data (total, by segment, by geography)
+        2. Operational metrics (units, volumes, customers, etc.)
+        3. Financial metrics (margins, profits, costs)
+        4. Time series data (quarterly/yearly comparisons)
         5. Any other key metrics shown in charts, tables, or text
         
-        Return the data as a JSON object with this structure:
-        {
-            "vehicle_metrics": {
-                "production": {"Model 3/Y": number, "Model S/X": number, "total": number},
-                "deliveries": {"Model 3/Y": number, "Model S/X": number, "total": number}
-            },
-            "energy_metrics": {
-                "storage_deployed_gwh": number,
-                "solar_deployed_mw": number
-            },
-            "financial_segments": {
-                "automotive_revenue": number,
-                "energy_revenue": number,
-                "services_revenue": number,
-                "total_revenue": number
-            },
-            "geographic_revenue": {
-                "united_states": number,
-                "china": number,
-                "europe": number,
-                "other": number
-            },
-            "margins": {
-                "total_gross_margin": number,
-                "automotive_gross_margin": number,
-                "operating_margin": number
-            },
-            "period": "Q1 2025" or appropriate period,
-            "page_number": number
-        }
+        Return the data as a JSON object. Include:
+        - The actual values found
+        - Units (millions, billions, %, etc.)
+        - The context/label for each value
+        - Period information if available
         
-        Extract actual numbers from charts, graphs, tables, and text. If a value is shown as a percentage, include the % symbol.
+        Focus on extracting concrete numbers and their contexts.
         """
         
         # Add expected structure to prompt if provided
-        if expected_structure and not custom_prompt:
+        if expected_structure:
             extraction_prompt += f"\n\nExpected data structure:\n{json.dumps(expected_structure, indent=2)}"
         
+        # Initialize generic data structure
         all_extracted_data = {
-            "vehicle_metrics": {},
-            "energy_metrics": {},
-            "financial_segments": {},
-            "geographic_revenue": {},
-            "margins": {},
-            "raw_extractions": []
+            "raw_extractions": [],
+            "extracted_values": []  # Store all extracted values generically
         }
         
         # Process each page
@@ -159,8 +112,8 @@ class GeminiClient:
                     extracted['page_number'] = page_num
                     all_extracted_data['raw_extractions'].append(extracted)
                     
-                    # Merge data (prefer non-empty values)
-                    self._merge_extracted_data(all_extracted_data, extracted)
+                    # Store all extracted values generically
+                    self._extract_generic_values(all_extracted_data, extracted, page_num)
                     
             except Exception as e:
                 logger.error(f"Error processing page {page_num}: {e}")
@@ -223,35 +176,63 @@ class GeminiClient:
             logger.error(f"Failed to parse JSON: {e}")
             return None
     
-    def _merge_extracted_data(self, target: Dict, source: Dict):
-        """Merge extracted data, preferring non-empty values"""
-        for key in ['vehicle_metrics', 'energy_metrics', 'financial_segments', 'geographic_revenue', 'margins']:
-            if key in source and source[key]:
-                if not target[key]:
-                    target[key] = source[key]
-                else:
-                    # Merge dictionaries, preferring non-zero values
-                    for sub_key, value in source[key].items():
-                        if value and (sub_key not in target[key] or not target[key][sub_key]):
-                            target[key][sub_key] = value
+    def _extract_generic_values(self, target: Dict, source: Dict, page_num: int):
+        """Extract values generically from the response"""
+        def extract_values(obj, path=''):
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    new_path = f"{path}.{key}" if path else key
+                    if isinstance(value, (int, float, str)) and value:
+                        # It's a value
+                        target['extracted_values'].append({
+                            'path': new_path,
+                            'key': key,
+                            'value': value,
+                            'page': page_num,
+                            'type': self._infer_value_type(new_path, value)
+                        })
+                    else:
+                        # Recurse
+                        extract_values(value, new_path)
+            elif isinstance(obj, list):
+                for i, item in enumerate(obj):
+                    extract_values(item, f"{path}[{i}]")
+        
+        extract_values(source)
+    
+    def _infer_value_type(self, path: str, value: Any) -> str:
+        """Infer the type of value from its path and content"""
+        path_lower = path.lower()
+        
+        if any(term in path_lower for term in ['revenue', 'sales']):
+            return 'revenue'
+        elif any(term in path_lower for term in ['margin', 'gross', 'operating']):
+            return 'margin'
+        elif any(term in path_lower for term in ['production', 'delivery', 'units', 'volume']):
+            return 'operational'
+        elif any(term in path_lower for term in ['income', 'profit', 'earnings']):
+            return 'income'
+        elif isinstance(value, str) and '%' in str(value):
+            return 'percentage'
+        else:
+            return 'other'
     
     def _post_process_extraction(self, data: Dict):
         """Clean and validate extracted data"""
         # Add extraction summary
         data['extraction_summary'] = {
             'pages_processed': len(data.get('raw_extractions', [])),
-            'vehicle_data_complete': bool(data.get('vehicle_metrics', {}).get('deliveries')),
-            'energy_data_complete': bool(data.get('energy_metrics', {}).get('storage_deployed_gwh')),
-            'financial_segments_complete': bool(data.get('financial_segments', {}).get('automotive_revenue')),
-            'geographic_data_complete': bool(data.get('geographic_revenue')),
-            'margins_complete': bool(data.get('margins', {}).get('total_gross_margin'))
+            'total_values_extracted': len(data.get('extracted_values', [])),
+            'value_types': {}
         }
         
-        # Calculate completeness score
-        completeness = sum(1 for v in data['extraction_summary'].values() if v and isinstance(v, bool))
-        data['extraction_summary']['completeness_score'] = completeness / 5 * 100
+        # Count values by type
+        for value_info in data.get('extracted_values', []):
+            value_type = value_info.get('type', 'other')
+            data['extraction_summary']['value_types'][value_type] = \
+                data['extraction_summary']['value_types'].get(value_type, 0) + 1
         
-        logger.info(f"Extraction completeness: {data['extraction_summary']['completeness_score']}%")
+        logger.info(f"Extracted {data['extraction_summary']['total_values_extracted']} values")
     
     def generate_financial_model(self, sec_data: Dict, earnings_data: Dict) -> Dict[str, Any]:
         """

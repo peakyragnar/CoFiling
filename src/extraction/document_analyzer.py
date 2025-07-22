@@ -146,13 +146,123 @@ class DocumentAnalyzer:
         # Typically on first page
         first_page_text = pdf.pages[0].extract_text() or ""
         
-        # Extract company name (usually in large font on first page)
-        lines = first_page_text.split('\n')[:10]  # First 10 lines
-        for line in lines:
-            if len(line) > 10 and not any(char.isdigit() for char in line[:5]):
-                # Likely company name
-                analysis["company_info"]["name"] = line.strip()
-                break
+        # Debug: Let's see what's actually on the first page
+        logger.debug(f"First page text (first 500 chars): {first_page_text[:500]}")
+        
+        # Strategy 1: Look for common company name patterns
+        company_patterns = [
+            # Formal company names with Inc., Corp., etc.
+            r'([A-Z][A-Za-z0-9\s&,.\'-]+(?:Inc\.|Corporation|Corp\.|Company|Co\.|LLC|Ltd\.|Limited|LP|LLP))',
+            # Stock ticker pattern (e.g., "NASDAQ: TSLA")
+            r'(?:NASDAQ|NYSE|AMEX|OTC)\s*:\s*([A-Z]{1,5})',
+            # Tesla-specific patterns
+            r'(Tesla[,\s]+Inc\.?)',
+            # Common header patterns
+            r'^([A-Z][A-Za-z0-9\s&,.\'-]+)\s*\n.*(?:Earnings|Results|Report)',
+            # Copyright patterns
+            r'(?:©|Copyright)\s*\d{4}\s+([A-Z][A-Za-z0-9\s&,.\'-]+)'
+        ]
+        
+        company_name = None
+        
+        # Try each pattern
+        for pattern in company_patterns:
+            match = re.search(pattern, first_page_text, re.MULTILINE | re.IGNORECASE)
+            if match:
+                potential_name = match.group(1).strip()
+                # Clean up the name
+                potential_name = re.sub(r'\s+', ' ', potential_name)  # Normalize spaces
+                
+                # Validate it's likely a company name
+                if len(potential_name) > 3 and len(potential_name) < 100:
+                    # For ticker symbols, we might need to look up the full name
+                    if re.match(r'^[A-Z]{1,5}$', potential_name):
+                        # This is a ticker, try to find the full name nearby
+                        ticker_context = first_page_text[max(0, match.start()-200):match.end()+200]
+                        for other_pattern in company_patterns[:3]:  # Try formal name patterns
+                            name_match = re.search(other_pattern, ticker_context, re.IGNORECASE)
+                            if name_match:
+                                company_name = name_match.group(1).strip()
+                                break
+                    else:
+                        company_name = potential_name
+                    
+                    if company_name:
+                        break
+        
+        # Strategy 2: If no pattern matched, look at first few lines
+        if not company_name:
+            lines = first_page_text.split('\n')[:10]  # First 10 lines
+            for line in lines:
+                line = line.strip()
+                # Look for lines that could be company names
+                if (len(line) > 5 and len(line) < 50 and 
+                    not line.lower().startswith(('for ', 'the ', 'and ', 'or ')) and
+                    not any(skip in line.lower() for skip in ['quarter', 'earnings', 'results', 'update'])):
+                    # Check if it looks like a company name (has capital letters, etc.)
+                    if re.match(r'^[A-Z][A-Za-z0-9\s&,.\'-]+', line):
+                        company_name = line
+                        break
+        
+        # Set the company name
+        if company_name:
+            analysis["company_info"]["name"] = company_name
+        else:
+            # Try to extract from the entire first page as last resort
+            # Look for "X announces" or "X reports" patterns
+            announce_pattern = r'([A-Z][A-Za-z0-9\s&,.\'-]+)\s+(?:announces?|reports?)'
+            match = re.search(announce_pattern, first_page_text, re.IGNORECASE)
+            if match:
+                analysis["company_info"]["name"] = match.group(1).strip()
+            else:
+                # If still not found, check the next few pages
+                logger.debug("Company name not found on first page, checking additional pages...")
+                for page_num in range(1, min(10, len(pdf.pages))):  # Check up to first 10 pages
+                    page_text = pdf.pages[page_num].extract_text() or ""
+                    
+                    # First try formal patterns
+                    for pattern in company_patterns[:5]:  # Try main patterns
+                        match = re.search(pattern, page_text, re.MULTILINE | re.IGNORECASE)
+                        if match:
+                            potential_name = match.group(1).strip()
+                            if len(potential_name) > 3 and len(potential_name) < 100:
+                                company_name = potential_name
+                                logger.debug(f"Found company name on page {page_num + 1}: {company_name}")
+                                break
+                    
+                    # Also look for company mentions in context (e.g., "The Tesla team")
+                    if not company_name:
+                        # Common patterns where company names appear
+                        context_patterns = [
+                            r'(?:The|the)\s+([A-Z][a-z]+)\s+(?:team|company|corporation)',
+                            r'([A-Z][a-z]+)\s+(?:reported|achieved|delivered|announced)',
+                            r'(?:at|by|from)\s+([A-Z][a-z]+)(?:\s|,|\.|$)',
+                            # Direct company name mentions
+                            r'\b(Tesla|Apple|Microsoft|Google|Amazon|Meta|NVIDIA)\b'
+                        ]
+                        
+                        for pattern in context_patterns:
+                            matches = re.finditer(pattern, page_text)
+                            for match in matches:
+                                potential_name = match.group(1).strip()
+                                # Validate it's a likely company name
+                                if (potential_name and 
+                                    len(potential_name) > 3 and 
+                                    potential_name[0].isupper() and
+                                    potential_name.lower() not in ['the', 'this', 'these', 'those']):
+                                    company_name = potential_name
+                                    logger.debug(f"Found company name in context on page {page_num + 1}: {company_name}")
+                                    break
+                            if company_name:
+                                break
+                    
+                    if company_name:
+                        break
+                
+                if company_name:
+                    analysis["company_info"]["name"] = company_name
+                else:
+                    analysis["company_info"]["name"] = "Unknown"
         
         # Extract period (Q1 2025, FY 2024, etc.)
         period_patterns = [
