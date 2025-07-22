@@ -23,17 +23,32 @@ class SegmentDiscovery:
                 r'.*Revenue.*(?:Automotive|Energy|Services?)',
                 r'.*(?:Product|Segment).*Revenue',
                 r'Revenue(?:From)?(?:Contract)?.*(?:Automotive|Energy|Services?)',
+                r'Automotive(?:Sales|Revenue|Leasing)',
+                r'Energy.*(?:Revenue|Sales)',
+                r'Services.*(?:Revenue|Sales)',
+                r'.*RegulatoryCredits?',
+                r'.*StorageRevenue',
+                r'.*SolarRevenue',
+                # Tesla-specific patterns
+                r'SalesRevenueEnergyServices',
+                r'CostOfServicesEnergyServices',
+                r'RevenueFrom.*Automotive',
+                r'.*AutomotiveSales',
+                r'.*AutomotiveLeasing',
             ],
             'geographic': [
                 r'.*Revenue.*(?:Domestic|Foreign|International)',
                 r'.*(?:UnitedStates|US|China|Europe|Asia).*Revenue',
                 r'.*Geographic.*Revenue',
                 r'.*Revenue.*(?:Geographic|Region)',
+                r'Revenue.*(?:UnitedStates|China|International|Foreign)',
+                r'.*(?:Domestic|International).*Sales',
             ],
             'customer': [
                 r'.*Revenue.*(?:Retail|Wholesale|Commercial)',
                 r'.*Customer.*Revenue',
                 r'.*Revenue.*Customer.*Type',
+                r'.*(?:Direct|Dealer).*Sales',
             ]
         }
         
@@ -41,17 +56,36 @@ class SegmentDiscovery:
         self.known_segments = {
             'tesla': {
                 'product': [
+                    # Actually found in Tesla's SEC data
+                    'SalesRevenueEnergyServices',
+                    'CostOfServicesEnergyServices',
+                    # Other potential concepts
                     'AutomotiveRevenue',
                     'EnergyGenerationAndStorageRevenue',
                     'ServicesAndOtherRevenue',
                     'AutomotiveSales',
                     'AutomotiveLeasing',
-                    'AutomotiveRegulatoryCredits'
+                    'AutomotiveRegulatoryCredits',
+                    'RevenueFromContractWithCustomerAutomotive',
+                    'RevenueFromContractWithCustomerEnergyGenerationAndStorage',
+                    'RevenueFromContractWithCustomerServicesAndOther',
+                    'SalesRevenue',
+                    'LeasingRevenue',
+                    'RegulatoryCreditsRevenue',
+                    'EnergyStorageRevenue',
+                    'SolarRevenue',
+                    'ServiceRevenue'
                 ],
                 'geographic': [
                     'RevenueFromContractWithCustomerExcludingAssessedTaxUnitedStates',
                     'RevenueFromContractWithCustomerExcludingAssessedTaxChina',
-                    'RevenueFromContractWithCustomerExcludingAssessedTaxOtherCountries'
+                    'RevenueFromContractWithCustomerExcludingAssessedTaxOtherCountries',
+                    'RevenueFromContractWithCustomerUnitedStates',
+                    'RevenueFromContractWithCustomerChina',
+                    'RevenueFromContractWithCustomerInternational',
+                    'DomesticRevenue',
+                    'InternationalRevenue',
+                    'RevenueByGeography'
                 ]
             }
         }
@@ -203,7 +237,7 @@ class SegmentDiscovery:
                         if recent_values:
                             segments['implicit_segments'][segment_type][concept] = recent_values
     
-    def _get_recent_values(self, concept_data: Dict, years_back: int = 3) -> List[Dict]:
+    def _get_recent_values(self, concept_data: Dict, years_back: int = 5) -> List[Dict]:
         """Get recent values for a concept"""
         if not isinstance(concept_data, dict) or 'units' not in concept_data:
             return []

@@ -357,7 +357,8 @@ class DocumentAnalyzer:
                 classification["type"] = "margins"
         
         # Operational metrics table
-        operational_indicators = ['units', 'delivered', 'produced', 'sold', 'volume', 'quantity']
+        operational_indicators = ['units', 'delivered', 'produced', 'sold', 'volume', 'quantity', 
+                                'production', 'deliveries', 'delivery', 'operational summary']
         if any(indicator in table_str for indicator in operational_indicators):
             classification["type"] = "operational_metrics"
             classification["confidence"] = 0.85
@@ -375,6 +376,43 @@ class DocumentAnalyzer:
     
     def _discover_metrics(self, text: str, page_num: int, analysis: Dict):
         """Discover what metrics are mentioned in the text"""
+        # Check for operational summary explicitly
+        if 'operational summary' in text.lower() or 'o p e r a t i o n a l   s u m m a r y' in text.lower():
+            if 'operational_metrics' not in analysis['data_locations']:
+                analysis['data_locations']['operational_metrics'] = []
+            if page_num not in analysis['data_locations']['operational_metrics']:
+                analysis['data_locations']['operational_metrics'].append(page_num)
+        
+        # Check for financial summary
+        if 'financial summary' in text.lower() or 'f i n a n c i a l   s u m m a r y' in text.lower():
+            if 'financial' not in analysis['data_locations']:
+                analysis['data_locations']['financial'] = []
+            if page_num not in analysis['data_locations']['financial']:
+                analysis['data_locations']['financial'].append(page_num)
+        
+        # Check for energy & services section
+        if ('energy & services' in text.lower() or 'e n e r g y   &   s e r v i c e s' in text.lower() or
+            'energy generation and storage' in text.lower()):
+            if 'segment_metrics' not in analysis['data_locations']:
+                analysis['data_locations']['segment_metrics'] = []
+            if page_num not in analysis['data_locations']['segment_metrics']:
+                analysis['data_locations']['segment_metrics'].append(page_num)
+        
+        # Check for outlook/guidance
+        if 'outlook' in text.lower() or 'o u t l o o k' in text.lower():
+            if 'guidance' not in analysis['data_locations']:
+                analysis['data_locations']['guidance'] = []
+            if page_num not in analysis['data_locations']['guidance']:
+                analysis['data_locations']['guidance'].append(page_num)
+        
+        # Check for technology/AI metrics
+        if ('core technology' in text.lower() or 'c o r e   t e c h n o l o g y' in text.lower() or
+            'fsd' in text.lower() or 'artificial intelligence' in text.lower()):
+            if 'technology_metrics' not in analysis['data_locations']:
+                analysis['data_locations']['technology_metrics'] = []
+            if page_num not in analysis['data_locations']['technology_metrics']:
+                analysis['data_locations']['technology_metrics'].append(page_num)
+        
         # Look for operational metrics
         for pattern in self.metric_patterns['volume']:
             matches = re.finditer(pattern, text, re.IGNORECASE)

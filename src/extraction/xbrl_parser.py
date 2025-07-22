@@ -25,7 +25,10 @@ class XBRLParser:
         cutoff_year = current_year - years_back
         
         print(f"Filtering for periods: {cutoff_year}-{current_year} (last {years_back} full years + current year)")
-        facts = raw_data.get('facts', {}).get('us-gaap', {})
+        
+        # Get facts from all available namespaces
+        all_facts = raw_data.get('facts', {})
+        facts = all_facts.get('us-gaap', {})
         
         formatted = {
             "metadata": {

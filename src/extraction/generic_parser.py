@@ -100,44 +100,64 @@ class GenericEarningsParser:
         extracted_data = schema.copy()
         instructions = schema["extraction_instructions"]
         
-        # Process primary pages for each data type
-        for page_group in instructions["primary_pages"]:
-            data_type = page_group["data_type"]
-            pages = page_group["pages"]
+        # Check if we should use optimized extraction
+        if hasattr(gemini_client, 'extract_pdf_data_optimized'):
+            # Use optimized batch extraction
+            logger.info("Using optimized batch extraction")
             
-            logger.info(f"Extracting {data_type} from pages: {pages}")
+            # Prepare custom prompts for each data type
+            custom_prompts = {}
+            for page_group in instructions["primary_pages"]:
+                data_type = page_group["data_type"]
+                prompt_key = f"{data_type}_extraction"
+                if prompt_key in instructions["gemini_prompts"]:
+                    custom_prompts[data_type] = instructions["gemini_prompts"][prompt_key]
+                else:
+                    custom_prompts[data_type] = self._generate_generic_prompt(data_type, schema)
             
-            # Use appropriate Gemini prompt
-            prompt_key = f"{data_type}_extraction"
-            if prompt_key in instructions["gemini_prompts"]:
-                prompt = instructions["gemini_prompts"][prompt_key]
-            else:
-                # Generate generic prompt
-                prompt = self._generate_generic_prompt(data_type, schema)
+            # Extract all data types at once
+            gemini_response = gemini_client.extract_pdf_data_optimized(
+                pdf_path,
+                instructions["primary_pages"],
+                custom_prompts
+            )
             
-            # Extract using Gemini with custom prompt
-            # Use parallel extraction for better performance
-            if hasattr(gemini_client, 'extract_pdf_data_parallel'):
-                # Convert pages list to priorities
-                page_priorities = {page: 1.0 if i < 5 else 0.8 for i, page in enumerate(pages)}
+            # Process results
+            if "data_by_type" in gemini_response:
+                for data_type, type_data in gemini_response["data_by_type"].items():
+                    self._merge_type_data(extracted_data, type_data, data_type)
+            
+            # Also process raw extractions
+            if "raw_extractions" in gemini_response:
+                for extraction in gemini_response["raw_extractions"]:
+                    self._process_structured_extraction(extracted_data, extraction)
+        else:
+            # Fallback to original method
+            logger.info("Using standard extraction (fallback)")
+            for page_group in instructions["primary_pages"]:
+                data_type = page_group["data_type"]
+                pages = page_group["pages"]
                 
-                gemini_response = gemini_client.extract_pdf_data_parallel(
-                    pdf_path,
-                    page_priorities=page_priorities,
-                    custom_prompt=prompt,
-                    expected_structure=self._get_expected_structure(data_type, schema)
-                )
-            else:
-                # Fallback to sequential extraction
+                logger.info(f"Extracting {data_type} from pages: {pages}")
+                
+                # Use appropriate Gemini prompt
+                prompt_key = f"{data_type}_extraction"
+                if prompt_key in instructions["gemini_prompts"]:
+                    prompt = instructions["gemini_prompts"][prompt_key]
+                else:
+                    # Generate generic prompt
+                    prompt = self._generate_generic_prompt(data_type, schema)
+                
+                # Extract using standard method
                 gemini_response = gemini_client.extract_pdf_data(
                     pdf_path,
                     page_numbers=pages,
                     custom_prompt=prompt,
                     expected_structure=self._get_expected_structure(data_type, schema)
                 )
-            
-            # Merge Gemini results into extracted data
-            self._merge_gemini_results(extracted_data, gemini_response, data_type)
+                
+                # Merge Gemini results into extracted data
+                self._merge_gemini_results(extracted_data, gemini_response, data_type)
         
         return extracted_data
     
@@ -417,6 +437,39 @@ class GenericEarningsParser:
         else:
             return "units"
     
+    def _merge_type_data(self, extracted_data: Dict, type_data: Dict, data_type: str):
+        """Merge data from optimized extraction by type"""
+        # Handle different data types
+        if data_type == "financial" and type_data:
+            if "revenue" in type_data:
+                # Ensure hierarchical structure exists
+                if "hierarchical_data" not in extracted_data:
+                    extracted_data["hierarchical_data"] = {}
+                if "financial" not in extracted_data["hierarchical_data"]:
+                    extracted_data["hierarchical_data"]["financial"] = {}
+                if "revenue" not in extracted_data["hierarchical_data"]["financial"]:
+                    extracted_data["hierarchical_data"]["financial"]["revenue"] = {}
+                
+                # Parse and store revenue value
+                revenue_val = self._parse_number(str(type_data["revenue"]))
+                if revenue_val:
+                    extracted_data["hierarchical_data"]["financial"]["revenue"]["total"] = {
+                        "value": revenue_val,
+                        "currency": "USD",
+                        "unit": "millions"
+                    }
+        elif data_type == "operational_metrics" and type_data:
+            for key, value in type_data.items():
+                if "flat_metrics" not in extracted_data:
+                    extracted_data["flat_metrics"] = {}
+                parsed_val = self._parse_number(str(value))
+                if parsed_val:
+                    extracted_data["flat_metrics"][key] = {
+                        "value": parsed_val,
+                        "unit": "units"
+                    }
+        # Add more type-specific handling as needed
+    
     def _merge_gemini_results(self, extracted_data: Dict, gemini_response: Dict,
                              data_type: str):
         """Merge Gemini extraction results into main data structure"""
@@ -578,12 +631,12 @@ class GenericEarningsParser:
         if value is None or (isinstance(value, str) and not value.strip()):
             return
         
-        # Skip metadata fields
-        if key in ['page_number', 'period', 'confidence', 'context', 'unit', 'currency', 'type', 'path']:
+        # Skip only pure metadata fields
+        if key in ['page_number', 'type', 'path', 'confidence', 'context'] and not any(data_key in path.lower() for data_key in ['revenue', 'margin', 'income', 'profit', 'cost']):
             return
         
         # Log successful value extraction for debugging
-        logger.debug(f"Placing value: key={key}, value={value}, type={value_type}, path={path}")
+        logger.info(f"Placing value: key={key}, value={value}, type={value_type}, path={path}")
         
         # Determine where to place the value based on its type and context
         if value_type == 'revenue':
@@ -595,22 +648,30 @@ class GenericEarningsParser:
             # Check if it's a segment revenue
             key_lower = key.lower()
             if any(seg in key_lower for seg in ['automotive', 'energy', 'services']):
-                if 'segments' not in extracted_data['hierarchical_data']['financial']:
-                    extracted_data['hierarchical_data']['financial']['segments'] = {}
+                if 'revenue' not in extracted_data['hierarchical_data']['financial']:
+                    extracted_data['hierarchical_data']['financial']['revenue'] = {}
+                if 'segments' not in extracted_data['hierarchical_data']['financial']['revenue']:
+                    extracted_data['hierarchical_data']['financial']['revenue']['segments'] = {}
                 
                 # Ensure we're creating proper value structure
                 segment_key = key.title() if key.islower() else key
-                # Clean segment key
-                segment_key = segment_key.replace('Revenue', '').replace('_', ' ').strip()
-                if not segment_key:
-                    segment_key = key
+                # Clean segment key - capitalize properly
+                if 'automotive' in key_lower:
+                    segment_key = 'Automotive'
+                elif 'energy' in key_lower:
+                    segment_key = 'Energy generation and storage'
+                elif 'services' in key_lower:
+                    segment_key = 'Services and other'
+                else:
+                    segment_key = segment_key.replace('Revenue', '').replace('_', ' ').strip()
+                    if not segment_key:
+                        segment_key = key
                     
                 parsed_value = self._parse_number(str(value)) if not isinstance(value, (int, float)) else float(value)
                 if parsed_value is not None:
-                    extracted_data['hierarchical_data']['financial']['segments'][segment_key] = {
+                    extracted_data['hierarchical_data']['financial']['revenue']['segments'][segment_key] = {
                         'value': parsed_value,
-                        'currency': 'USD',
-                        'unit': 'millions',
+                        'percentage_of_total': None,  # Will be calculated later
                         'source_page': value_info.get('page')
                     }
                     logger.info(f"Added segment {segment_key}: ${parsed_value}M")
@@ -667,6 +728,43 @@ class GenericEarningsParser:
                 margin_key = key.replace('_margin', '').replace('margin', '').strip()
             
             extracted_data['hierarchical_data']['financial']['margins'][margin_key] = margin_value
+        
+        elif value_type == 'income':
+            if 'hierarchical_data' not in extracted_data:
+                extracted_data['hierarchical_data'] = {}
+            if 'financial' not in extracted_data['hierarchical_data']:
+                extracted_data['hierarchical_data']['financial'] = {}
+            
+            # Check what type of income this is
+            key_lower = key.lower()
+            parsed_value = self._parse_number(str(value)) if not isinstance(value, (int, float)) else float(value)
+            
+            if parsed_value is not None:
+                if 'gross_profit' in key_lower:
+                    if 'costs' not in extracted_data['hierarchical_data']['financial']:
+                        extracted_data['hierarchical_data']['financial']['costs'] = {}
+                    extracted_data['hierarchical_data']['financial']['costs']['gross_profit'] = parsed_value
+                    logger.info(f"Added gross profit: ${parsed_value}M")
+                elif 'operating_income' in key_lower:
+                    if 'income' not in extracted_data['flat_metrics']:
+                        extracted_data['flat_metrics'] = extracted_data.get('flat_metrics', {})
+                    extracted_data['flat_metrics']['operating_income'] = {
+                        'value': parsed_value,
+                        'currency': 'USD',
+                        'unit': 'millions',
+                        'source_page': value_info.get('page')
+                    }
+                    logger.info(f"Added operating income: ${parsed_value}M")
+                elif 'net_income' in key_lower:
+                    if 'income' not in extracted_data['flat_metrics']:
+                        extracted_data['flat_metrics'] = extracted_data.get('flat_metrics', {})
+                    extracted_data['flat_metrics']['net_income'] = {
+                        'value': parsed_value,
+                        'currency': 'USD',
+                        'unit': 'millions',
+                        'source_page': value_info.get('page')
+                    }
+                    logger.info(f"Added net income: ${parsed_value}M")
         
         elif value_type == 'operational':
             if 'flat_metrics' not in extracted_data:
@@ -932,6 +1030,23 @@ class GenericEarningsParser:
                             "unit": "millions"
                         }
                         logger.info(f"Extracted {region_name} revenue: ${parsed_value}M")
+    
+    def _infer_value_type(self, path: str, value: Any) -> str:
+        """Infer the type of value from its path and content"""
+        path_lower = path.lower()
+        
+        if any(term in path_lower for term in ['revenue', 'sales']):
+            return 'revenue'
+        elif any(term in path_lower for term in ['margin', 'gross', 'operating']):
+            return 'margin'
+        elif any(term in path_lower for term in ['production', 'delivery', 'units', 'volume']):
+            return 'operational'
+        elif any(term in path_lower for term in ['income', 'profit', 'earnings']):
+            return 'income'
+        elif isinstance(value, str) and '%' in str(value):
+            return 'percentage'
+        else:
+            return 'other'
     
     def _calculate_completeness(self, extracted_data: Dict, schema: Dict) -> float:
         """Calculate how complete the extraction is"""

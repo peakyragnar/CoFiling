@@ -9,6 +9,7 @@ import PIL.Image
 import io
 import pypdf
 from .parallel_extractor import ParallelPDFExtractor
+from .optimized_extractor import OptimizedPDFExtractor
 
 # Try to load .env file if it exists
 try:
@@ -47,6 +48,24 @@ class GeminiClient:
         
         # Initialize parallel extractor with single worker to avoid rate limits
         self.parallel_extractor = ParallelPDFExtractor(self, max_workers=1)
+        
+        # Initialize optimized extractor for better performance
+        self.optimized_extractor = OptimizedPDFExtractor(self)
+    
+    def extract_pdf_data_optimized(self, pdf_path: str, page_groups: List[Dict[str, Any]], 
+                                   custom_prompts: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        """
+        Extract data using optimized batch processing
+        
+        Args:
+            pdf_path: Path to PDF file
+            page_groups: List of dicts with 'data_type' and 'pages' keys
+            custom_prompts: Optional dict mapping data_type to custom prompts
+            
+        Returns:
+            Extracted data organized by data type
+        """
+        return self.optimized_extractor.extract_specific_pages(pdf_path, page_groups, custom_prompts)
     
     def extract_pdf_data_parallel(self, pdf_path: str, page_priorities: Optional[Dict[int, float]] = None,
                                  custom_prompt: Optional[str] = None, expected_structure: Optional[Dict] = None) -> Dict[str, Any]:

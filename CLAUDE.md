@@ -5,6 +5,12 @@ A generic system to extract financial data from SEC filings and earnings reports
 
 ## Current Implementation Status (July 22, 2025)
 
+### Design Specification
+The system extracts:
+- **Current year**: All data from 2025
+- **Previous 5 years**: Full data from 2020, 2021, 2022, 2023, 2024
+- **Total coverage**: 6 years of financial data
+
 ### ✅ Completed
 
 1. **SEC Data Pipeline**
